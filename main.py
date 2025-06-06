@@ -10,7 +10,6 @@ import re
 import requests
 import os
 import sys
-import socket
 from collections import deque
 from difflib import SequenceMatcher
 
@@ -18,25 +17,13 @@ from difflib import SequenceMatcher
 last_focused_window = None
 typed_chars = []
 phrase_buffer = deque(maxlen=10)
-recent_phrases = deque(maxlen=50)
+recent_phrases = deque(maxlen=100)
 suggestion_active = False
+listener_running = False
 WORD_BOUNDARIES = {'space', 'tab', '.', ',', '?', '!', ';', ':'}
 CURRENT_VERSION = "1.0.0"
 
-# --- Single-instance check using socket ---
-def is_already_running():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("127.0.0.1", 65432))
-        return False
-    except OSError:
-        return True
-
-if is_already_running():
-    print("[Info] Tool already running.")
-    sys.exit()
-
-# --- Normalize Text ---
+# --- Normalize and Prepare Text ---
 def normalize_text(text):
     text = text.lower()
     text = re.sub(r"[-_']", " ", text)
@@ -52,12 +39,14 @@ class GrammarEngine:
 
     def check_phrase(self, phrase):
         norm = normalize_text(phrase)
+        if norm in self.original_map:
+            return []
         scored = sorted(
-            [(k, SequenceMatcher(None, norm, k).ratio()) for k in self.keywords if k != norm],
+            [(k, SequenceMatcher(None, norm, k).ratio()) for k in self.keywords],
             key=lambda x: x[1],
             reverse=True
         )
-        return [self.original_map[k] for k, _ in scored[:10]]
+        return [self.original_map[k] for k, _ in scored[:10] if _ > 0.6]
 
 # --- Suggestion Popup ---
 class SuggestionPopup(ctk.CTkToplevel):
@@ -119,6 +108,7 @@ def apply_correction(original, correction):
 
     except Exception as e:
         print(f"[Error] Correction failed: {e}")
+        suggestion_active = False
 
 # --- Keyboard Listener ---
 def on_key_press(event):
@@ -133,7 +123,6 @@ def on_key_press(event):
             typed_chars.clear()
             if word:
                 phrase_buffer.append(word)
-                suggestion_active = False
                 check_combinations()
     elif name == 'enter':
         typed_chars.clear()
@@ -143,22 +132,26 @@ def on_key_press(event):
         typed_chars.pop()
 
 def start_keyboard_listener():
-    keyboard.on_press(on_key_press)
+    global listener_running
+    if not listener_running:
+        listener_running = True
+        keyboard.on_press(on_key_press)
 
 # --- Phrase Handling ---
 def check_combinations():
+    global suggestion_active
+    if suggestion_active:
+        return
     for n in range(4, 0, -1):
         if len(phrase_buffer) >= n:
             phrase = ' '.join(list(phrase_buffer)[-n:])
             norm_phrase = normalize_text(phrase)
             if norm_phrase not in recent_phrases:
                 on_phrase_completed(phrase)
+                break
 
 def on_phrase_completed(phrase):
     global suggestion_active
-    if suggestion_active:
-        return
-
     suggestions = ge.check_phrase(phrase)
     if suggestions:
         norm_phrase = normalize_text(phrase)
@@ -228,10 +221,9 @@ def main():
 
     keyword_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/allowed_phrases.txt"
     keywords = load_keywords_from_url(keyword_url)
-
     if not keywords:
-        print("[Warning] No keywords loaded. Using fallback.")
-        keywords = ["home care", "heartland care", "sample company"]
+        print("[Error] No keywords loaded.")
+        return
 
     ge = GrammarEngine(keywords)
     start_keyboard_listener()
