@@ -1,3 +1,5 @@
+import os
+import sys
 import keyboard
 import threading
 import time
@@ -8,10 +10,20 @@ import pygetwindow as gw
 import pyperclip
 import re
 import requests
-import os
-import sys
 from collections import deque
 from difflib import SequenceMatcher
+
+# --- Prevent Multiple Instances ---
+LOCK_FILE = "spell_tool.lock"
+if os.path.exists(LOCK_FILE):
+    print("[Info] Tool already running.")
+    sys.exit()
+
+with open(LOCK_FILE, "w") as f:
+    f.write("locked")
+
+import atexit
+atexit.register(lambda: os.remove(LOCK_FILE) if os.path.exists(LOCK_FILE) else None)
 
 # --- Globals ---
 last_focused_window = None
@@ -21,9 +33,9 @@ recent_phrases = deque(maxlen=50)
 suggestion_active = False
 listener_running = False
 WORD_BOUNDARIES = {'space', 'tab', '.', ',', '?', '!', ';', ':'}
-CURRENT_VERSION = "1.0.0"  # Local version of the tool
+CURRENT_VERSION = "1.0.0"  # Local version (ignored now)
 
-# --- Normalize and Prepare Text ---
+# --- Normalize Text ---
 def normalize_text(text):
     text = text.lower()
     text = re.sub(r"[-_']", " ", text)
@@ -89,7 +101,7 @@ def apply_correction(original, correction):
                 win[0].activate()
                 time.sleep(0.4)
 
-        # Delete the original phrase using backspace only (avoids jumpy behavior)
+        # Delete phrase using Ctrl+Backspace
         for _ in range(len(original.split())):
             pyautogui.keyDown('ctrl')
             pyautogui.press('backspace')
@@ -136,7 +148,7 @@ def start_keyboard_listener():
         listener_running = True
         keyboard.on_press(on_key_press)
 
-# --- Phrase Handling ---
+# --- Phrase Matching ---
 def check_combinations():
     for n in range(4, 0, -1):
         if len(phrase_buffer) >= n:
@@ -181,36 +193,9 @@ def load_keywords_from_url(url):
         print(f"[Error] Loading keywords from URL: {e}")
         return []
 
-# --- Version Check ---
+# --- Version Check (Disabled) ---
 def check_for_updates():
-    try:
-        version_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/version.txt"
-        response = requests.get(version_url)
-        latest_version = response.text.strip()
-
-        if latest_version > CURRENT_VERSION:
-            print(f"[Update] New version available: {latest_version}")
-            update_tool()
-        else:
-            print("[Update] Tool is up to date.")
-    except Exception as e:
-        print(f"[Error] Checking for updates: {e}")
-
-# --- Update Logic ---
-def update_tool():
-    try:
-        new_code_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/main.py"
-        response = requests.get(new_code_url)
-        response.raise_for_status()
-
-        with open(sys.argv[0], 'w', encoding='utf-8') as f:
-            f.write(response.text)
-
-        print("[Update] Tool updated. Restarting...")
-        os.execv(sys.executable, ['python'] + sys.argv)
-
-    except Exception as e:
-        print(f"[Error] Updating tool: {e}")
+    print("[Skip] main.py update skipped – handled by launcher.")
 
 # --- Main ---
 def main():
