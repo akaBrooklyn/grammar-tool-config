@@ -7,6 +7,9 @@ import pyautogui
 import pygetwindow as gw
 import pyperclip
 import re
+import requests
+import os
+import sys
 from collections import deque
 from difflib import SequenceMatcher
 
@@ -17,7 +20,8 @@ phrase_buffer = deque(maxlen=10)
 recent_phrases = deque(maxlen=50)
 suggestion_active = False
 listener_running = False
-WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':'}
+WORD_BOUNDARIES = {'space', 'tab', '.', ',', '?', '!', ';', ':'}
+CURRENT_VERSION = "1.0.0"  # Local version of the tool
 
 # --- Normalize and Prepare Text ---
 def normalize_text(text):
@@ -85,16 +89,15 @@ def apply_correction(original, correction):
                 win[0].activate()
                 time.sleep(0.4)
 
-        pyperclip.copy(correction + ' ')
-
-        # Select and delete entire phrase (ensures no characters are left behind)
-        for _ in range(len(original)):
+        # Delete the original phrase using backspace only (avoids jumpy behavior)
+        for _ in range(len(original.split())):
+            pyautogui.keyDown('ctrl')
             pyautogui.press('backspace')
-            time.sleep(0.001)
-        pyautogui.press('backspace')  # Extra to ensure removal of one stray char
+            pyautogui.keyUp('ctrl')
+            time.sleep(0.05)
 
-        # Paste the correct phrase
-        pyautogui.hotkey('ctrl', 'v')
+        pyperclip.copy(correction + ' ')
+        keyboard.send('ctrl+v')
         time.sleep(0.05)
 
         typed_chars.clear()
@@ -120,6 +123,10 @@ def on_key_press(event):
                 phrase_buffer.append(word)
                 suggestion_active = False
                 check_combinations()
+    elif name == 'enter':
+        typed_chars.clear()
+        phrase_buffer.clear()
+        suggestion_active = False
     elif name == 'backspace' and typed_chars:
         typed_chars.pop()
 
@@ -165,18 +172,53 @@ def on_phrase_completed(phrase):
         ).start()
 
 # --- Keyword Loader ---
-def load_keywords_from_file(filename):
+def load_keywords_from_url(url):
     try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f if line.strip()]
+        response = requests.get(url)
+        response.raise_for_status()
+        return [line.strip() for line in response.text.splitlines() if line.strip()]
     except Exception as e:
-        print(f"[Error] Loading keywords: {e}")
+        print(f"[Error] Loading keywords from URL: {e}")
         return []
+
+# --- Version Check ---
+def check_for_updates():
+    try:
+        version_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/version.txt"
+        response = requests.get(version_url)
+        latest_version = response.text.strip()
+
+        if latest_version > CURRENT_VERSION:
+            print(f"[Update] New version available: {latest_version}")
+            update_tool()
+        else:
+            print("[Update] Tool is up to date.")
+    except Exception as e:
+        print(f"[Error] Checking for updates: {e}")
+
+# --- Update Logic ---
+def update_tool():
+    try:
+        new_code_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/main.py"
+        response = requests.get(new_code_url)
+        response.raise_for_status()
+
+        with open(sys.argv[0], 'w', encoding='utf-8') as f:
+            f.write(response.text)
+
+        print("[Update] Tool updated. Restarting...")
+        os.execv(sys.executable, ['python'] + sys.argv)
+
+    except Exception as e:
+        print(f"[Error] Updating tool: {e}")
 
 # --- Main ---
 def main():
     global ge
-    keywords = load_keywords_from_file("keywords.txt")
+    check_for_updates()
+
+    keyword_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/allowed_phrases.txt"
+    keywords = load_keywords_from_url(keyword_url)
     if not keywords:
         print("[Error] No keywords loaded.")
         return
