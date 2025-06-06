@@ -1,5 +1,3 @@
-import os
-import sys
 import keyboard
 import threading
 import time
@@ -10,20 +8,11 @@ import pygetwindow as gw
 import pyperclip
 import re
 import requests
+import os
+import sys
+import socket
 from collections import deque
 from difflib import SequenceMatcher
-
-# --- Prevent Multiple Instances ---
-LOCK_FILE = "spell_tool.lock"
-if os.path.exists(LOCK_FILE):
-    print("[Info] Tool already running.")
-    sys.exit()
-
-with open(LOCK_FILE, "w") as f:
-    f.write("locked")
-
-import atexit
-atexit.register(lambda: os.remove(LOCK_FILE) if os.path.exists(LOCK_FILE) else None)
 
 # --- Globals ---
 last_focused_window = None
@@ -31,9 +20,21 @@ typed_chars = []
 phrase_buffer = deque(maxlen=10)
 recent_phrases = deque(maxlen=50)
 suggestion_active = False
-listener_running = False
 WORD_BOUNDARIES = {'space', 'tab', '.', ',', '?', '!', ';', ':'}
-CURRENT_VERSION = "1.0.0"  # Local version (ignored now)
+CURRENT_VERSION = "1.0.0"
+
+# --- Single-instance check using socket ---
+def is_already_running():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("127.0.0.1", 65432))
+        return False
+    except OSError:
+        return True
+
+if is_already_running():
+    print("[Info] Tool already running.")
+    sys.exit()
 
 # --- Normalize Text ---
 def normalize_text(text):
@@ -101,7 +102,6 @@ def apply_correction(original, correction):
                 win[0].activate()
                 time.sleep(0.4)
 
-        # Delete phrase using Ctrl+Backspace
         for _ in range(len(original.split())):
             pyautogui.keyDown('ctrl')
             pyautogui.press('backspace')
@@ -143,12 +143,9 @@ def on_key_press(event):
         typed_chars.pop()
 
 def start_keyboard_listener():
-    global listener_running
-    if not listener_running:
-        listener_running = True
-        keyboard.on_press(on_key_press)
+    keyboard.on_press(on_key_press)
 
-# --- Phrase Matching ---
+# --- Phrase Handling ---
 def check_combinations():
     for n in range(4, 0, -1):
         if len(phrase_buffer) >= n:
@@ -193,9 +190,36 @@ def load_keywords_from_url(url):
         print(f"[Error] Loading keywords from URL: {e}")
         return []
 
-# --- Version Check (Disabled) ---
+# --- Version Check ---
 def check_for_updates():
-    print("[Skip] main.py update skipped – handled by launcher.")
+    try:
+        version_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/version.txt"
+        response = requests.get(version_url)
+        latest_version = response.text.strip()
+
+        if latest_version > CURRENT_VERSION:
+            print(f"[Update] New version available: {latest_version}")
+            update_tool()
+        else:
+            print("[Update] Tool is up to date.")
+    except Exception as e:
+        print(f"[Error] Checking for updates: {e}")
+
+# --- Update Logic ---
+def update_tool():
+    try:
+        new_code_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/main.py"
+        response = requests.get(new_code_url)
+        response.raise_for_status()
+
+        with open(sys.argv[0], 'w', encoding='utf-8') as f:
+            f.write(response.text)
+
+        print("[Update] Tool updated. Restarting...")
+        os.execv(sys.executable, ['python'] + sys.argv)
+
+    except Exception as e:
+        print(f"[Error] Updating tool: {e}")
 
 # --- Main ---
 def main():
@@ -204,9 +228,10 @@ def main():
 
     keyword_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/allowed_phrases.txt"
     keywords = load_keywords_from_url(keyword_url)
+
     if not keywords:
-        print("[Error] No keywords loaded.")
-        return
+        print("[Warning] No keywords loaded. Using fallback.")
+        keywords = ["home care", "heartland care", "sample company"]
 
     ge = GrammarEngine(keywords)
     start_keyboard_listener()
