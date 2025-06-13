@@ -1,236 +1,95 @@
 import keyboard
 import threading
 import time
-import customtkinter as ctk
-import difflib
 import pyautogui
 import pygetwindow as gw
 import pyperclip
-import re
 import requests
+import difflib
+from collections import deque
+import customtkinter as ctk
 import os
 import sys
-from collections import deque
-from difflib import SequenceMatcher
+
+# --- Config ---
+GITHUB_PHRASES_URL = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/refs/heads/main/allowed_phrases.txt"
+VERSION = "1.0.0"
+VERSION_URL = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/refs/heads/main/main.py"
 
 # --- Globals ---
-last_focused_window = None
 typed_chars = []
 phrase_buffer = deque(maxlen=10)
-recent_phrases = deque(maxlen=100)
-suggestion_active = False
-listener_running = False
-WORD_BOUNDARIES = {'space', 'tab', '.', ',', '?', '!', ';', ':'}
-CURRENT_VERSION = "1.0.0"
+recent_phrases = deque(maxlen=50)
+allowed_phrases = []
+popup = None
 
-# --- Normalize and Prepare Text ---
-def normalize_text(text):
-    text = text.lower()
-    text = re.sub(r"[-_']", " ", text)
-    text = re.sub(r"[^\w\s]", "", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-# --- Grammar Engine ---
-class GrammarEngine:
-    def __init__(self, keywords):
-        self.keywords = [normalize_text(k) for k in keywords]
-        self.original_map = {normalize_text(k): k for k in keywords}
-
-    def check_phrase(self, phrase):
-        norm = normalize_text(phrase)
-        if norm in self.original_map:
-            return []
-        scored = sorted(
-            [(k, SequenceMatcher(None, norm, k).ratio()) for k in self.keywords],
-            key=lambda x: x[1],
-            reverse=True
-        )
-        return [self.original_map[k] for k, _ in scored[:10] if _ > 0.6]
-
-# --- Suggestion Popup ---
-class SuggestionPopup(ctk.CTkToplevel):
-    def __init__(self, phrase, suggestions, callback):
-        super().__init__()
-        self.phrase = phrase
-        self.callback = callback
-        self.title("Suggestion")
-        self.attributes("-topmost", True)
-        self.geometry(self._center_geometry(300, 50 + 40 * len(suggestions)))
-        self.resizable(False, False)
-
-        label = ctk.CTkLabel(self, text=f"Correction for: '{phrase}'")
-        label.pack(pady=10)
-
-        for sug in suggestions:
-            btn = ctk.CTkButton(self, text=sug, command=lambda s=sug: self.select(s))
-            btn.pack(pady=3)
-
-        self.after(8000, self.destroy)
-
-    def _center_geometry(self, w, h):
-        screen_width, screen_height = pyautogui.size()
-        x = (screen_width - w) // 2
-        y = (screen_height - h) // 2
-        return f"{w}x{h}+{x}+{y}"
-
-    def select(self, correction):
-        self.callback(self.phrase, correction)
-        self.destroy()
-
-# --- Correction Handler ---
-def apply_correction(original, correction):
-    global last_focused_window, suggestion_active
+def download_allowed_phrases():
     try:
-        print(f"[Correction] Replacing '{original}' → '{correction}'")
-        time.sleep(0.2)
-
-        if last_focused_window:
-            win = gw.getWindowsWithTitle(last_focused_window)
-            if win:
-                win[0].activate()
-                time.sleep(0.4)
-
-        for _ in range(len(original.split())):
-            pyautogui.keyDown('ctrl')
-            pyautogui.press('backspace')
-            pyautogui.keyUp('ctrl')
-            time.sleep(0.05)
-
-        pyperclip.copy(correction + ' ')
-        keyboard.send('ctrl+v')
-        time.sleep(0.05)
-
-        typed_chars.clear()
-        phrase_buffer.clear()
-        suggestion_active = False
-        print("[Replacement done]")
-
+        response = requests.get(GITHUB_PHRASES_URL)
+        if response.ok:
+            return [line.strip() for line in response.text.splitlines() if line.strip()]
     except Exception as e:
-        print(f"[Error] Correction failed: {e}")
-        suggestion_active = False
+        print(f"Error loading phrases: {e}")
+    return []
 
-# --- Keyboard Listener ---
-def on_key_press(event):
-    global suggestion_active
+def is_typing_window():
+    win = gw.getActiveWindow()
+    return win and win.title and "pycharm" not in win.title.lower()
 
-    name = event.name
-    if len(name) == 1 and name.isprintable():
-        typed_chars.append(name)
-    elif name in WORD_BOUNDARIES:
-        if typed_chars:
-            word = ''.join(typed_chars).strip()
-            typed_chars.clear()
-            if word:
-                phrase_buffer.append(word)
-                check_combinations()
-    elif name == 'enter':
-        typed_chars.clear()
-        phrase_buffer.clear()
-        suggestion_active = False
-    elif name == 'backspace' and typed_chars:
-        typed_chars.pop()
+def show_suggestions(suggestions, original_phrase):
+    global popup
+    if popup:
+        popup.destroy()
 
-def start_keyboard_listener():
-    global listener_running
-    if not listener_running:
-        listener_running = True
-        keyboard.on_press(on_key_press)
+    popup = ctk.CTk()
+    popup.geometry("300x200+100+100")
+    popup.title("Suggestions")
 
-# --- Phrase Handling ---
-def check_combinations():
-    global suggestion_active
-    if suggestion_active:
-        return
-    for n in range(4, 0, -1):
-        if len(phrase_buffer) >= n:
-            phrase = ' '.join(list(phrase_buffer)[-n:])
-            norm_phrase = normalize_text(phrase)
-            if norm_phrase not in recent_phrases:
-                on_phrase_completed(phrase)
-                break
+    def replace_text(suggestion):
+        for _ in range(len(original_phrase)):
+            pyautogui.press("backspace")
+        pyautogui.typewrite(suggestion)
+        popup.destroy()
 
-def on_phrase_completed(phrase):
-    global suggestion_active
-    suggestions = ge.check_phrase(phrase)
-    if suggestions:
-        norm_phrase = normalize_text(phrase)
-        recent_phrases.append(norm_phrase)
-        suggestion_active = True
-        print(f"[Match] '{phrase}' → {suggestions}")
+    for suggestion in suggestions:
+        btn = ctk.CTkButton(popup, text=suggestion, command=lambda s=suggestion: replace_text(s))
+        btn.pack(pady=2)
 
-        try:
-            active = gw.getActiveWindow()
-            if active:
-                global last_focused_window
-                last_focused_window = active.title
-        except:
-            last_focused_window = None
+    popup.mainloop()
 
-        threading.Thread(
-            target=SuggestionPopup,
-            args=(phrase, suggestions, apply_correction),
-            daemon=True
-        ).start()
+def listen_keys():
+    global allowed_phrases
 
-# --- Keyword Loader ---
-def load_keywords_from_url(url):
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return [line.strip() for line in response.text.splitlines() if line.strip()]
-    except Exception as e:
-        print(f"[Error] Loading keywords from URL: {e}")
-        return []
+    while True:
+        event = keyboard.read_event()
+        if event.event_type == keyboard.KEY_DOWN:
+            char = event.name
+            if len(char) == 1:
+                typed_chars.append(char)
+            elif char == "space" or char == "enter":
+                phrase = ''.join(typed_chars).strip()
+                typed_chars.clear()
+                if not phrase:
+                    continue
+                phrase_buffer.append(phrase)
+                full_phrase = ' '.join(phrase_buffer)
+                if full_phrase in recent_phrases:
+                    continue
+                matches = [p for p in allowed_phrases if SequenceMatcher(None, full_phrase.lower(), p.lower()).ratio() > 0.7]
+                if matches:
+                    recent_phrases.append(full_phrase)
+                    show_suggestions(matches, full_phrase)
 
-# --- Version Check ---
-def check_for_updates():
-    try:
-        version_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/version.txt"
-        response = requests.get(version_url)
-        latest_version = response.text.strip()
+def SequenceMatcher(a, b):
+    return difflib.SequenceMatcher(None, a, b)
 
-        if latest_version > CURRENT_VERSION:
-            print(f"[Update] New version available: {latest_version}")
-            update_tool()
-        else:
-            print("[Update] Tool is up to date.")
-    except Exception as e:
-        print(f"[Error] Checking for updates: {e}")
-
-# --- Update Logic ---
-def update_tool():
-    try:
-        new_code_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/main.py"
-        response = requests.get(new_code_url)
-        response.raise_for_status()
-
-        with open(sys.argv[0], 'w', encoding='utf-8') as f:
-            f.write(response.text)
-
-        print("[Update] Tool updated. Restarting...")
-        os.execv(sys.executable, ['python'] + sys.argv)
-
-    except Exception as e:
-        print(f"[Error] Updating tool: {e}")
-
-# --- Main ---
 def main():
-    global ge
-    check_for_updates()
-
-    keyword_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/allowed_phrases.txt"
-    keywords = load_keywords_from_url(keyword_url)
-    if not keywords:
-        print("[Error] No keywords loaded.")
-        return
-
-    ge = GrammarEngine(keywords)
-    start_keyboard_listener()
-
-    root = ctk.CTk()
-    root.withdraw()
-    root.mainloop()
+    print("INFO:GrammarTool:Listening for keys...")
+    global allowed_phrases
+    allowed_phrases = download_allowed_phrases()
+    threading.Thread(target=listen_keys, daemon=True).start()
+    while True:
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()
