@@ -1,0 +1,17 @@
+{
+  "stable": {
+    "version": "1.2.0",
+    "release_date": "2023-07-15",
+    "changelog": "Fixed critical bugs, improved performance",
+    "download_url": "https://.../GrammarTool_v1.2.0.zip",
+    "sha256": "a1b2c3...",
+    "min_supported_version": "1.0.0",
+    "delta_updates": {
+      "1.1.0": "https://.../GrammarTool_1.1.0_to_1.2.0.patch"
+    }
+  },
+  "beta": {
+    "version": "1.3.0-beta",
+    "...": "..."
+  }
+}
