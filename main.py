@@ -423,12 +423,19 @@ class GrammarPalApp:
         name = event.name
 
         if len(name) == 1 and name.isprintable():
+            # Skip if the character is a digit (number)
+            if name.isdigit():
+                self.typed_chars.clear()
+                return
             self.typed_chars.append(name)
         elif name in WORD_BOUNDARIES:
             if self.typed_chars:
                 word = ''.join(self.typed_chars).strip()
                 self.typed_chars.clear()
                 if word:
+                    # Skip if the word contains any digits
+                    if any(c.isdigit() for c in word):
+                        return
                     self.phrase_buffer.append(word)
                     self.suggestion_active = False
                     self.check_combinations()
@@ -441,7 +448,9 @@ class GrammarPalApp:
                 phrase = ' '.join(list(self.phrase_buffer)[-n:])
                 norm_phrase = GrammarEngine.normalize_text(phrase)
                 if norm_phrase not in self.recent_phrases:
-                    self.on_phrase_completed(phrase)
+                    # Skip if the phrase contains any digits
+                    if not any(c.isdigit() for c in phrase):
+                        self.on_phrase_completed(phrase)
 
     def on_phrase_completed(self, phrase: str):
         if self.suggestion_active:
