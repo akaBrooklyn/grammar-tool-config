@@ -22,8 +22,8 @@ VERSION = "1.0.2"
 CONFIG_FILE = "config.json"
 DEFAULT_KEYWORDS_FILE = "keywords.txt"
 WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n'}
-MIN_SUGGESTIONS = 5
-MAX_SUGGESTIONS = 10
+MIN_SUGGESTIONS = 10
+MAX_SUGGESTIONS = 20
 
 
 # --- Setup Logging ---
