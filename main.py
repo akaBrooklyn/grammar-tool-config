@@ -194,7 +194,7 @@ class SuggestionPopup(ctk.CTkToplevel):
         scroll_frame = ctk.CTkScrollableFrame(self, height=min(300, 35 * len(suggestions)))
         scroll_frame.pack(pady=5, padx=10, fill="both", expand=True)
 
-        for sug in suggestions[:10]:  # Show max 10 suggestions
+        for sug in suggestions[:20]:  # Show max 10 suggestions
             btn = ctk.CTkButton(
                 scroll_frame,
                 text=sug,
