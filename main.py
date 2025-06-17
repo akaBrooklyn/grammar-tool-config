@@ -7,186 +7,766 @@ import pyautogui
 import pygetwindow as gw
 import pyperclip
 import re
+import json
+import logging
+import os
+import pystray
+import requests
+import webbrowser
 from collections import deque
 from difflib import SequenceMatcher
+from PIL import Image
+from typing import List, Dict, Optional, Deque, Tuple
+from launcher import Updater
 
-# --- Globals ---
-last_focused_window = None
-typed_chars = []
-phrase_buffer = deque(maxlen=10)
-recent_phrases = deque(maxlen=50)
-suggestion_active = False
-listener_running = False
-WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':'}
+# --- Constants ---
+APP_NAME = "GrammarPal"
+VERSION = "1.0.0"
+CONFIG_FILE = "config.json"
+DEFAULT_KEYWORDS_FILE = "allowed_phrases.txt"
+WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n'}
+MIN_SUGGESTIONS = 5
+MAX_SUGGESTIONS = 10
 
-# --- Normalize and Prepare Text ---
-def normalize_text(text):
-    text = text.lower()
-    text = re.sub(r"[-_']", " ", text)
-    text = re.sub(r"[^\w\s]", "", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+
+# --- Setup Logging ---
+def setup_logging():
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(os.path.join(log_dir, f"{APP_NAME.lower()}.log")),
+            logging.StreamHandler()
+        ]
+    )
+
+
+# --- Configuration Manager ---
+class ConfigManager:
+    def __init__(self):
+        self.config = self._load_config()
+        self.allowed_phrases_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/allowed_phrases.txt"
+        self.remote_config_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/config.json"
+
+    def _load_config(self) -> Dict:
+        default_config = {
+            "suggestion_timeout": 8,
+            "max_phrase_length": 10,
+            "recent_phrases_size": 50,
+            "min_similarity": 0.5,
+            "theme": "dark",
+            "start_minimized": True,
+            "enable_partial_matching": True,
+            "check_updates_on_startup": True,
+            "remote_config_enabled": True
+        }
+
+        # Try to load local config first
+        local_config = {}
+        try:
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, 'r') as f:
+                    local_config = json.load(f)
+        except Exception as e:
+            logging.error(f"Error loading local config: {e}")
+
+        # Try to load remote config if enabled
+        remote_config = {}
+        if local_config.get('remote_config_enabled', True):
+            try:
+                response = requests.get(self.remote_config_url, timeout=5)
+                response.raise_for_status()
+                remote_config = response.json()
+                logging.info("Successfully loaded remote config")
+            except Exception as e:
+                logging.warning(f"Couldn't fetch remote config: {e}")
+
+        # Merge configs (local overrides remote, both override defaults)
+        return {**default_config, **remote_config, **local_config}
+
+    def load_keywords(self) -> List[str]:
+        """Load keywords from remote source with local fallback"""
+        keywords = []
+
+        # Try remote source first
+        try:
+            response = requests.get(self.allowed_phrases_url, timeout=5)
+            response.raise_for_status()
+            keywords = [line.strip() for line in response.text.split('\n') if line.strip()]
+            logging.info(f"Loaded {len(keywords)} phrases from remote")
+            return keywords
+        except Exception as e:
+            logging.warning(f"Couldn't fetch remote phrases: {e}")
+
+        # Fallback to local file if exists
+        local_file = self.config.get("keywords_file", DEFAULT_KEYWORDS_FILE)
+        try:
+            if os.path.exists(local_file):
+                with open(local_file, 'r', encoding='utf-8') as f:
+                    keywords = [line.strip() for line in f if line.strip()]
+                    logging.info(f"Loaded {len(keywords)} phrases from local file")
+        except Exception as e:
+            logging.error(f"Error loading local phrases: {e}")
+
+        return keywords
+
+    def save_config(self):
+        """Only save local config (never save to remote)"""
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.config, f, indent=4)
+        except Exception as e:
+            logging.error(f"Error saving config: {e}")
+
+    def get(self, key: str, default=None):
+        return self.config.get(key, default)
+
+    def set(self, key: str, value):
+        self.config[key] = value
+        self.save_config()
+
 
 # --- Grammar Engine ---
 class GrammarEngine:
-    def __init__(self, keywords):
-        self.keywords = [normalize_text(k) for k in keywords]
-        self.original_map = {normalize_text(k): k for k in keywords}
+    def __init__(self, keywords: List[str]):
+        self.keywords = [self.normalize_text(k) for k in keywords]
+        self.original_map = {self.normalize_text(k): k for k in keywords}
+        self.word_index = self.build_word_index()
 
-    def check_phrase(self, phrase):
-        norm = normalize_text(phrase)
-        scored = sorted(
-            [(k, SequenceMatcher(None, norm, k).ratio()) for k in self.keywords if k != norm],
-            key=lambda x: x[1],
-            reverse=True
-        )
-        return [self.original_map[k] for k, _ in scored[:10]]
+    @staticmethod
+    def normalize_text(text: str) -> str:
+        text = text.lower()
+        text = re.sub(r"[-_']", " ", text)
+        text = re.sub(r"[^\w\s]", "", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def build_word_index(self) -> Dict[str, List[str]]:
+        """Create an index of individual words to their full phrases"""
+        index = {}
+        for phrase in self.keywords:
+            words = phrase.split()
+            for word in words:
+                if word not in index:
+                    index[word] = []
+                if phrase not in index[word]:
+                    index[word].append(phrase)
+        return index
+
+    def check_phrase(self, phrase: str, min_similarity: float = 0.5, partial_matching: bool = True) -> List[str]:
+        norm_phrase = self.normalize_text(phrase)
+
+        # Get matches through multiple methods
+        all_matches = []
+
+        # 1. Exact prefix matches (highest priority)
+        prefix_matches = [
+            (k, 1.0) for k in self.keywords
+            if k.startswith(norm_phrase) and k != norm_phrase
+        ]
+        all_matches.extend(prefix_matches)
+
+        # 2. Partial word matches (if enabled)
+        if partial_matching:
+            input_words = norm_phrase.split()
+            if input_words:
+                candidate_phrases = set()
+                for word in input_words:
+                    if word in self.word_index:
+                        candidate_phrases.update(self.word_index[word])
+
+                for candidate in candidate_phrases:
+                    common_words = set(input_words) & set(candidate.split())
+                    score = len(common_words) / len(input_words)
+                    if score >= 0.5:
+                        all_matches.append((candidate, score * 0.9))  # Slightly lower than exact matches
+
+        # 3. Similarity matches
+        similarity_matches = [
+            (k, SequenceMatcher(None, norm_phrase, k).ratio())
+            for k in self.keywords
+            if k != norm_phrase
+        ]
+        all_matches.extend(similarity_matches)
+
+        # Combine and deduplicate matches
+        unique_matches = {}
+        for phrase, score in all_matches:
+            if phrase not in unique_matches or score > unique_matches[phrase]:
+                unique_matches[phrase] = score
+
+        # Filter by minimum similarity and sort
+        filtered = [
+            (phrase, score)
+            for phrase, score in unique_matches.items()
+            if score >= min_similarity
+        ]
+        sorted_matches = sorted(filtered, key=lambda x: (-x[1], len(x[0])))
+
+        # Get original phrases for top matches
+        results = [self.original_map[phrase] for phrase, _ in sorted_matches[:MAX_SUGGESTIONS]]
+
+        # Ensure minimum suggestions
+        if len(results) < MIN_SUGGESTIONS:
+            remaining = [
+                            self.original_map[k] for k in self.keywords
+                            if self.original_map[k] not in results
+                        ][:MIN_SUGGESTIONS - len(results)]
+            results.extend(remaining)
+
+        return results
+
 
 # --- Suggestion Popup ---
 class SuggestionPopup(ctk.CTkToplevel):
-    def __init__(self, phrase, suggestions, callback):
+    def __init__(self, phrase: str, suggestions: List[str], callback, timeout: int = 8):
         super().__init__()
         self.phrase = phrase
         self.callback = callback
-        self.title("Suggestion")
+        self.title(f"{APP_NAME} - Suggestion")
         self.attributes("-topmost", True)
-        self.geometry(self._center_geometry(300, 50 + 40 * len(suggestions)))
+        self.geometry(self._center_geometry(400, 50 + 40 * min(len(suggestions), 10)))
         self.resizable(False, False)
 
-        label = ctk.CTkLabel(self, text=f"Correction for: '{phrase}'")
+        # Limit displayed phrase length
+        display_phrase = phrase[:50] + ('...' if len(phrase) > 50 else '')
+
+        label = ctk.CTkLabel(self, text=f"Did you mean instead of: '{display_phrase}'")
         label.pack(pady=10)
 
-        for sug in suggestions:
-            btn = ctk.CTkButton(self, text=sug, command=lambda s=sug: self.select(s))
-            btn.pack(pady=3)
+        # Create a scrollable frame for suggestions
+        scroll_frame = ctk.CTkScrollableFrame(self, height=min(300, 35 * len(suggestions)))
+        scroll_frame.pack(pady=5, padx=10, fill="both", expand=True)
 
-        self.after(8000, self.destroy)
+        for sug in suggestions[:10]:  # Show max 10 suggestions
+            btn = ctk.CTkButton(
+                scroll_frame,
+                text=sug,
+                command=lambda s=sug: self.select(s),
+                anchor="w",
+                width=380,
+                height=30
+            )
+            btn.pack(pady=2, fill="x")
 
-    def _center_geometry(self, w, h):
+        self.after(timeout * 1000, self.destroy)
+
+    def _center_geometry(self, w: int, h: int) -> str:
         screen_width, screen_height = pyautogui.size()
         x = (screen_width - w) // 2
         y = (screen_height - h) // 2
         return f"{w}x{h}+{x}+{y}"
 
-    def select(self, correction):
+    def select(self, correction: str):
         self.callback(self.phrase, correction)
         self.destroy()
 
-# --- Correction Handler ---
-def apply_correction(original, correction):
-    global last_focused_window, suggestion_active
-    try:
-        print(f"[Correction] Replacing '{original}' → '{correction}'")
-        time.sleep(0.2)
 
-        if last_focused_window:
-            win = gw.getWindowsWithTitle(last_focused_window)
-            if win:
-                win[0].activate()
-                time.sleep(0.4)
+# --- Main Application ---
+class GrammarPalApp:
+    def __init__(self):
+        setup_logging()
+        self.config = ConfigManager()
+        self.keywords = self.load_keywords()
+        self.ge = GrammarEngine(self.keywords)
 
-        pyperclip.copy(correction + ' ')
+        # State variables
+        self.typed_chars: List[str] = []
+        self.phrase_buffer: Deque[str] = deque(maxlen=self.config.get("max_phrase_length", 10))
+        self.recent_phrases: Deque[str] = deque(maxlen=self.config.get("recent_phrases_size", 50))
+        self.suggestion_active: bool = False
+        self.listener_running: bool = False
+        self.last_focused_window: Optional[str] = None
 
-        # Select and delete entire phrase (ensures no characters are left behind)
-        for _ in range(len(original)):
-            pyautogui.press('backspace')
-            time.sleep(0.001)
-        pyautogui.press('backspace')  # Extra to ensure removal of one stray char
+        # Initialize UI
+        self.root = ctk.CTk()
+        self.root.title(f"{APP_NAME} v{VERSION}")
+        self.root.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
 
-        # Paste the correct phrase
-        pyautogui.hotkey('ctrl', 'v')
-        time.sleep(0.05)
+        # Initialize updater
+        self.updater = Updater(VERSION)
 
-        typed_chars.clear()
-        phrase_buffer.clear()
-        suggestion_active = False
-        print("[Replacement done]")
+        # System tray
+        self.tray_icon = self.create_tray_icon()
 
-    except Exception as e:
-        print(f"[Error] Correction failed: {e}")
+        # Setup UI
+        self.setup_ui()
 
-# --- Keyboard Listener ---
-def on_key_press(event):
-    global suggestion_active
+        # Start keyboard listener
+        self.start_keyboard_listener()
 
-    name = event.name
-    if len(name) == 1 and name.isprintable():
-        typed_chars.append(name)
-    elif name in WORD_BOUNDARIES:
-        if typed_chars:
-            word = ''.join(typed_chars).strip()
-            typed_chars.clear()
-            if word:
-                phrase_buffer.append(word)
-                suggestion_active = False
-                check_combinations()
-    elif name == 'backspace' and typed_chars:
-        typed_chars.pop()
+        # Check for updates on startup if configured
+        if self.config.get("check_updates_on_startup", True):
+            self.check_for_updates_on_startup()
 
-def start_keyboard_listener():
-    global listener_running
-    if not listener_running:
-        listener_running = True
-        keyboard.on_press(on_key_press)
+        # Start minimized if configured
+        if self.config.get("start_minimized", True):
+            self.minimize_to_tray()
 
-# --- Phrase Handling ---
-def check_combinations():
-    for n in range(4, 0, -1):
-        if len(phrase_buffer) >= n:
-            phrase = ' '.join(list(phrase_buffer)[-n:])
-            norm_phrase = normalize_text(phrase)
-            if norm_phrase not in recent_phrases:
-                on_phrase_completed(phrase)
+    def setup_ui(self):
+        ctk.set_appearance_mode(self.config.get("theme", "dark"))
+        self.root.geometry("600x500")
 
-def on_phrase_completed(phrase):
-    global suggestion_active
-    if suggestion_active:
-        return
+        # Main frame
+        self.main_frame = ctk.CTkFrame(self.root)
+        self.main_frame.pack(pady=20, padx=20, fill="both", expand=True)
 
-    suggestions = ge.check_phrase(phrase)
-    if suggestions:
-        norm_phrase = normalize_text(phrase)
-        recent_phrases.append(norm_phrase)
-        suggestion_active = True
-        print(f"[Match] '{phrase}' → {suggestions}")
+        # Title frame
+        title_frame = ctk.CTkFrame(self.main_frame)
+        title_frame.pack(fill="x", pady=(0, 10))
 
-        try:
-            active = gw.getActiveWindow()
-            if active:
-                global last_focused_window
-                last_focused_window = active.title
-        except:
-            last_focused_window = None
+        ctk.CTkLabel(title_frame, text=f"{APP_NAME}", font=("Arial", 18, "bold")).pack(side="left", padx=10)
+        ctk.CTkLabel(title_frame, text=f"v{VERSION}", font=("Arial", 12)).pack(side="right", padx=10)
+
+        # Status frame
+        self.status_frame = ctk.CTkFrame(self.main_frame)
+        self.status_frame.pack(fill="x", pady=5)
+
+        self.status_label = ctk.CTkLabel(self.status_frame, text="Status: Running", text_color="green")
+        self.status_label.pack(side="left", padx=10)
+
+        self.update_status_label = ctk.CTkLabel(
+            self.status_frame,
+            text="",
+            font=("Arial", 10)
+        )
+        self.update_status_label.pack(side="right", padx=10)
+
+        # Stats frame
+        stats_frame = ctk.CTkFrame(self.main_frame)
+        stats_frame.pack(fill="x", pady=10)
+
+        stats_grid = ctk.CTkFrame(stats_frame)
+        stats_grid.pack(pady=5)
+
+        ctk.CTkLabel(stats_grid, text="Keywords loaded:", font=("Arial", 12)).grid(row=0, column=0, sticky="w", padx=5,
+                                                                                   pady=2)
+        self.keywords_label = ctk.CTkLabel(stats_grid, text=str(len(self.keywords)), font=("Arial", 12, "bold"))
+        self.keywords_label.grid(row=0, column=1, sticky="w", padx=5, pady=2)
+
+        ctk.CTkLabel(stats_grid, text="Recent phrases:", font=("Arial", 12)).grid(row=1, column=0, sticky="w", padx=5,
+                                                                                  pady=2)
+        self.phrases_label = ctk.CTkLabel(stats_grid, text=str(len(self.recent_phrases)), font=("Arial", 12, "bold"))
+        self.phrases_label.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+
+        # Settings frame
+        settings_frame = ctk.CTkFrame(self.main_frame)
+        settings_frame.pack(fill="x", pady=10)
+
+        ctk.CTkLabel(settings_frame, text="Settings", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=5)
+
+        # Theme setting
+        theme_frame = ctk.CTkFrame(settings_frame)
+        theme_frame.pack(fill="x", padx=10, pady=5)
+
+        ctk.CTkLabel(theme_frame, text="Theme:", font=("Arial", 12)).pack(side="left", padx=5)
+        self.theme_var = ctk.StringVar(value=self.config.get("theme", "dark"))
+        theme_menu = ctk.CTkOptionMenu(
+            theme_frame,
+            values=["dark", "light", "system"],
+            variable=self.theme_var,
+            command=self.change_theme,
+            width=100
+        )
+        theme_menu.pack(side="left")
+
+        # Partial matching toggle
+        self.partial_match_var = ctk.BooleanVar(value=self.config.get("enable_partial_matching", True))
+        ctk.CTkCheckBox(
+            settings_frame,
+            text="Enable partial word matching",
+            variable=self.partial_match_var,
+            command=self.toggle_partial_matching,
+            font=("Arial", 12)
+        ).pack(anchor="w", padx=10, pady=5)
+
+        # Start minimized toggle
+        self.start_minimized_var = ctk.BooleanVar(value=self.config.get("start_minimized", True))
+        ctk.CTkCheckBox(
+            settings_frame,
+            text="Start minimized to tray",
+            variable=self.start_minimized_var,
+            command=self.toggle_start_minimized,
+            font=("Arial", 12)
+        ).pack(anchor="w", padx=10, pady=5)
+
+        # Remote config toggle
+        self.remote_config_var = ctk.BooleanVar(value=self.config.get("remote_config_enabled", True))
+        ctk.CTkCheckBox(
+            settings_frame,
+            text="Enable remote configuration",
+            variable=self.remote_config_var,
+            command=self.toggle_remote_config,
+            font=("Arial", 12)
+        ).pack(anchor="w", padx=10, pady=5)
+
+        # Auto-update toggle
+        self.auto_update_var = ctk.BooleanVar(value=self.config.get("check_updates_on_startup", True))
+        ctk.CTkCheckBox(
+            settings_frame,
+            text="Check for updates on startup",
+            variable=self.auto_update_var,
+            command=self.toggle_auto_update,
+            font=("Arial", 12)
+        ).pack(anchor="w", padx=10, pady=5)
+
+        # Buttons frame
+        buttons_frame = ctk.CTkFrame(self.main_frame)
+        buttons_frame.pack(pady=10)
+
+        ctk.CTkButton(
+            buttons_frame,
+            text="Reload Keywords",
+            command=self.reload_keywords,
+            width=120,
+            height=30
+        ).pack(side="left", padx=10)
+
+        ctk.CTkButton(
+            buttons_frame,
+            text="Check for Updates",
+            command=self.check_for_updates_manual,
+            width=120,
+            height=30
+        ).pack(side="left", padx=10)
+
+        ctk.CTkButton(
+            buttons_frame,
+            text="Exit",
+            command=self.quit_app,
+            fg_color="#d9534f",
+            hover_color="#c9302c",
+            width=120,
+            height=30
+        ).pack(side="left", padx=10)
+
+    def create_tray_icon(self):
+        # Create a simple icon image
+        image = Image.new('RGB', (64, 64), color='blue')
+
+        menu = (
+            pystray.MenuItem("Show", self.show_from_tray),
+            pystray.MenuItem("Check for Updates", self.check_for_updates_manual),
+            pystray.MenuItem("Exit", self.quit_app)
+        )
+
+        icon = pystray.Icon(
+            APP_NAME,
+            image,
+            f"{APP_NAME} {VERSION}",
+            menu
+        )
 
         threading.Thread(
-            target=SuggestionPopup,
-            args=(phrase, suggestions, apply_correction),
+            target=icon.run,
             daemon=True
         ).start()
 
-# --- Keyword Loader ---
-def load_keywords_from_file(filename):
-    try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            return [line.strip() for line in f if line.strip()]
-    except Exception as e:
-        print(f"[Error] Loading keywords: {e}")
-        return []
+        return icon
 
-# --- Main ---
-def main():
-    global ge
-    keywords = load_keywords_from_file("keywords.txt")
-    if not keywords:
-        print("[Error] No keywords loaded.")
-        return
+    def show_from_tray(self):
+        self.root.after(0, self.root.deiconify)
 
-    ge = GrammarEngine(keywords)
-    start_keyboard_listener()
+    def minimize_to_tray(self):
+        self.root.withdraw()
 
-    root = ctk.CTk()
-    root.withdraw()
-    root.mainloop()
+    def change_theme(self, choice):
+        ctk.set_appearance_mode(choice)
+        self.config.set("theme", choice)
 
+    def toggle_partial_matching(self):
+        self.config.set("enable_partial_matching", self.partial_match_var.get())
+
+    def toggle_start_minimized(self):
+        self.config.set("start_minimized", self.start_minimized_var.get())
+
+    def toggle_remote_config(self):
+        self.config.set("remote_config_enabled", self.remote_config_var.get())
+
+    def toggle_auto_update(self):
+        self.config.set("check_updates_on_startup", self.auto_update_var.get())
+
+    def load_keywords(self) -> List[str]:
+        return self.config.load_keywords()
+
+    def reload_keywords(self):
+        self.keywords = self.load_keywords()
+        self.ge = GrammarEngine(self.keywords)
+        self.keywords_label.configure(text=str(len(self.keywords)))
+        logging.info("Keywords reloaded")
+        self.status_label.configure(text="Status: Keywords Reloaded", text_color="blue")
+        self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+
+    def start_keyboard_listener(self):
+        if not self.listener_running:
+            keyboard.unhook_all()
+            keyboard.on_press(self.on_key_press)
+            self.listener_running = True
+            logging.info("Keyboard listener started")
+
+    def on_key_press(self, event):
+        name = event.name
+
+        if len(name) == 1 and name.isprintable():
+            self.typed_chars.append(name)
+        elif name in WORD_BOUNDARIES:
+            if self.typed_chars:
+                word = ''.join(self.typed_chars).strip()
+                self.typed_chars.clear()
+                if word:
+                    self.phrase_buffer.append(word)
+                    self.suggestion_active = False
+                    self.check_combinations()
+        elif name == 'backspace' and self.typed_chars:
+            self.typed_chars.pop()
+
+    def check_combinations(self):
+        for n in range(4, 0, -1):
+            if len(self.phrase_buffer) >= n:
+                phrase = ' '.join(list(self.phrase_buffer)[-n:])
+                norm_phrase = GrammarEngine.normalize_text(phrase)
+                if norm_phrase not in self.recent_phrases:
+                    self.on_phrase_completed(phrase)
+
+    def on_phrase_completed(self, phrase: str):
+        if self.suggestion_active:
+            return
+
+        min_similarity = self.config.get("min_similarity", 0.5)
+        partial_matching = self.config.get("enable_partial_matching", True)
+        suggestions = self.ge.check_phrase(phrase, min_similarity, partial_matching)
+
+        if suggestions:
+            norm_phrase = GrammarEngine.normalize_text(phrase)
+            self.recent_phrases.append(norm_phrase)
+            self.suggestion_active = True
+            logging.info(f"Match found: '{phrase}' → {suggestions[:3]}... (Total: {len(suggestions)})")
+
+            try:
+                active = gw.getActiveWindow()
+                if active:
+                    self.last_focused_window = active.title
+            except Exception as e:
+                logging.warning(f"Couldn't get active window: {e}")
+                self.last_focused_window = None
+
+            timeout = self.config.get("suggestion_timeout", 8)
+            threading.Thread(
+                target=lambda: SuggestionPopup(
+                    phrase,
+                    suggestions,
+                    self.apply_correction,
+                    timeout
+                ),
+                daemon=True
+            ).start()
+
+            self.root.after(0, lambda: self.phrases_label.configure(text=str(len(self.recent_phrases))))
+
+    def apply_correction(self, original: str, correction: str):
+        try:
+            logging.info(f"Applying correction: '{original}' → '{correction}'")
+            time.sleep(0.2)
+
+            if self.last_focused_window:
+                try:
+                    win = gw.getWindowsWithTitle(self.last_focused_window)
+                    if win:
+                        win[0].activate()
+                        time.sleep(0.4)
+                except Exception as e:
+                    logging.warning(f"Couldn't activate window: {e}")
+
+            pyperclip.copy(correction + ' ')
+
+            # Delete the original phrase
+            for _ in range(len(original)):
+                pyautogui.press('backspace')
+                time.sleep(0.001)
+            pyautogui.press('backspace')  # Extra to ensure removal
+
+            # Paste the correction
+            pyautogui.hotkey('ctrl', 'v')
+            time.sleep(0.05)
+
+            self.typed_chars.clear()
+            self.phrase_buffer.clear()
+
+        except Exception as e:
+            logging.error(f"Correction failed: {e}")
+        finally:
+            self.suggestion_active = False
+
+    def check_for_updates_on_startup(self):
+        """Background update check on startup"""
+
+        def bg_check():
+            try:
+                update_info = self.updater.check_for_updates()
+                if update_info.get('available'):
+                    self.root.after(0, lambda: self.notify_update_available(update_info))
+            except Exception as e:
+                logging.error(f"Background update check failed: {e}")
+
+        threading.Thread(target=bg_check, daemon=True).start()
+
+    def check_for_updates_manual(self):
+        """Manual update check triggered by user"""
+        self.update_status_label.configure(text="Checking for updates...", text_color="blue")
+
+        def do_check():
+            try:
+                update_info = self.updater.check_for_updates()
+                if update_info.get('available'):
+                    self.root.after(0, lambda: self.prompt_update(update_info))
+                else:
+                    self.root.after(0, lambda: self.update_status_label.configure(
+                        text="You have the latest version",
+                        text_color="green"
+                    ))
+            except Exception as e:
+                self.root.after(0, lambda: self.update_status_label.configure(
+                    text=f"Update check failed: {str(e)}",
+                    text_color="red"
+                ))
+                logging.error(f"Manual update check failed: {e}")
+
+        threading.Thread(target=do_check, daemon=True).start()
+
+    def notify_update_available(self, update_info: dict):
+        """Show notification about available update"""
+        self.update_status_label.configure(
+            text=f"Update v{update_info['version']} available!",
+            text_color="orange"
+        )
+
+    def prompt_update(self, update_info: dict):
+        """Show update dialog"""
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Update Available")
+        dialog.geometry("500x300")
+        dialog.attributes("-topmost", True)
+
+        ctk.CTkLabel(
+            dialog,
+            text=f"Version {update_info['version']} is available!",
+            font=("Arial", 14, "bold")
+        ).pack(pady=10)
+
+        scroll_frame = ctk.CTkScrollableFrame(dialog)
+        scroll_frame.pack(pady=10, padx=10, fill="both", expand=True)
+
+        ctk.CTkLabel(
+            scroll_frame,
+            text=update_info.get('release_notes', 'No release notes available'),
+            justify="left",
+            wraplength=400
+        ).pack(anchor="w")
+
+        buttons_frame = ctk.CTkFrame(dialog)
+        buttons_frame.pack(pady=10)
+
+        ctk.CTkButton(
+            buttons_frame,
+            text="Update Now",
+            command=lambda: self.perform_update(update_info, dialog),
+            width=100
+        ).pack(side="left", padx=10)
+
+        ctk.CTkButton(
+            buttons_frame,
+            text="View Release",
+            command=lambda: webbrowser.open(update_info['html_url']),
+            width=100
+        ).pack(side="left", padx=10)
+
+        ctk.CTkButton(
+            buttons_frame,
+            text="Later",
+            command=dialog.destroy,
+            width=100
+        ).pack(side="left", padx=10)
+
+    def perform_update(self, update_info: dict, dialog: ctk.CTkToplevel):
+        """Download and apply the update"""
+        dialog.destroy()
+        self.update_status_label.configure(text="Downloading update...", text_color="blue")
+
+        progress_window = ctk.CTkToplevel(self.root)
+        progress_window.title("Updating...")
+        progress_window.geometry("400x150")
+        progress_window.attributes("-topmost", True)
+
+        progress_label = ctk.CTkLabel(
+            progress_window,
+            text="Downloading update...",
+            font=("Arial", 12)
+        )
+        progress_label.pack(pady=20)
+
+        progress_bar = ctk.CTkProgressBar(progress_window, width=300)
+        progress_bar.pack()
+        progress_bar.set(0)
+
+        def update_thread():
+            try:
+                # Find the asset to download (assuming it's a zip file)
+                asset = next(
+                    (a for a in update_info.get('assets', [])
+                     if a['name'].lower().endswith('.zip')),
+                    None
+                )
+
+                if not asset:
+                    raise Exception("No update package found in release")
+
+                # Download the update
+                self.root.after(0, lambda: progress_label.configure(text="Downloading update..."))
+                zip_path = self.updater.download_asset(asset['browser_download_url'])
+
+                # Apply the update
+                self.root.after(0, lambda: progress_label.configure(text="Applying update..."))
+                self.root.after(0, lambda: progress_bar.set(0.5))
+
+                target_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                success = self.updater.apply_update(zip_path, target_dir)
+
+                if success:
+                    self.root.after(0, lambda: progress_label.configure(text="Update complete! Restarting..."))
+                    self.root.after(0, lambda: progress_bar.set(1.0))
+                    time.sleep(2)
+                    self.updater.restart_application()
+                else:
+                    raise Exception("Update application failed")
+
+            except Exception as e:
+                self.root.after(0, lambda: progress_label.configure(
+                    text=f"Update failed: {str(e)}",
+                    text_color="red"
+                ))
+                logging.error(f"Update failed: {e}")
+                self.root.after(0, lambda: self.update_status_label.configure(
+                    text="Update failed",
+                    text_color="red"
+                ))
+
+        threading.Thread(target=update_thread, daemon=True).start()
+
+    def quit_app(self):
+        logging.info("Shutting down application")
+        keyboard.unhook_all()
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.root.quit()
+        self.root.destroy()
+
+    def run(self):
+        self.root.mainloop()
+
+
+# --- Main Entry Point ---
 if __name__ == "__main__":
-    main()
+    app = GrammarPalApp()
+    app.run()
