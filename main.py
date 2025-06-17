@@ -11,19 +11,16 @@ import json
 import logging
 import os
 import pystray
-import requests
-import webbrowser
 from collections import deque
 from difflib import SequenceMatcher
 from PIL import Image
 from typing import List, Dict, Optional, Deque, Tuple
-from launcher import Updater
 
 # --- Constants ---
 APP_NAME = "GrammarPal"
-VERSION = "1.0.0"
+VERSION = "1.0.2"
 CONFIG_FILE = "config.json"
-DEFAULT_KEYWORDS_FILE = "allowed_phrases.txt"
+DEFAULT_KEYWORDS_FILE = "keywords.txt"
 WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n'}
 MIN_SUGGESTIONS = 5
 MAX_SUGGESTIONS = 10
@@ -47,73 +44,30 @@ def setup_logging():
 class ConfigManager:
     def __init__(self):
         self.config = self._load_config()
-        self.allowed_phrases_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/allowed_phrases.txt"
-        self.remote_config_url = "https://raw.githubusercontent.com/akaBrooklyn/grammar-tool-config/main/config.json"
 
     def _load_config(self) -> Dict:
         default_config = {
+            "keywords_file": DEFAULT_KEYWORDS_FILE,
             "suggestion_timeout": 8,
             "max_phrase_length": 10,
             "recent_phrases_size": 50,
             "min_similarity": 0.5,
             "theme": "dark",
             "start_minimized": True,
-            "enable_partial_matching": True,
-            "check_updates_on_startup": True,
-            "remote_config_enabled": True
+            "enable_partial_matching": True
         }
 
-        # Try to load local config first
-        local_config = {}
         try:
             if os.path.exists(CONFIG_FILE):
                 with open(CONFIG_FILE, 'r') as f:
-                    local_config = json.load(f)
+                    loaded = json.load(f)
+                    return {**default_config, **loaded}
         except Exception as e:
-            logging.error(f"Error loading local config: {e}")
+            logging.error(f"Error loading config: {e}")
 
-        # Try to load remote config if enabled
-        remote_config = {}
-        if local_config.get('remote_config_enabled', True):
-            try:
-                response = requests.get(self.remote_config_url, timeout=5)
-                response.raise_for_status()
-                remote_config = response.json()
-                logging.info("Successfully loaded remote config")
-            except Exception as e:
-                logging.warning(f"Couldn't fetch remote config: {e}")
-
-        # Merge configs (local overrides remote, both override defaults)
-        return {**default_config, **remote_config, **local_config}
-
-    def load_keywords(self) -> List[str]:
-        """Load keywords from remote source with local fallback"""
-        keywords = []
-
-        # Try remote source first
-        try:
-            response = requests.get(self.allowed_phrases_url, timeout=5)
-            response.raise_for_status()
-            keywords = [line.strip() for line in response.text.split('\n') if line.strip()]
-            logging.info(f"Loaded {len(keywords)} phrases from remote")
-            return keywords
-        except Exception as e:
-            logging.warning(f"Couldn't fetch remote phrases: {e}")
-
-        # Fallback to local file if exists
-        local_file = self.config.get("keywords_file", DEFAULT_KEYWORDS_FILE)
-        try:
-            if os.path.exists(local_file):
-                with open(local_file, 'r', encoding='utf-8') as f:
-                    keywords = [line.strip() for line in f if line.strip()]
-                    logging.info(f"Loaded {len(keywords)} phrases from local file")
-        except Exception as e:
-            logging.error(f"Error loading local phrases: {e}")
-
-        return keywords
+        return default_config
 
     def save_config(self):
-        """Only save local config (never save to remote)"""
         try:
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(self.config, f, indent=4)
@@ -285,9 +239,6 @@ class GrammarPalApp:
         self.root.title(f"{APP_NAME} v{VERSION}")
         self.root.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
 
-        # Initialize updater
-        self.updater = Updater(VERSION)
-
         # System tray
         self.tray_icon = self.create_tray_icon()
 
@@ -296,10 +247,6 @@ class GrammarPalApp:
 
         # Start keyboard listener
         self.start_keyboard_listener()
-
-        # Check for updates on startup if configured
-        if self.config.get("check_updates_on_startup", True):
-            self.check_for_updates_on_startup()
 
         # Start minimized if configured
         if self.config.get("start_minimized", True):
@@ -310,32 +257,25 @@ class GrammarPalApp:
         self.root.geometry("600x500")
 
         # Main frame
-        self.main_frame = ctk.CTkFrame(self.root)
-        self.main_frame.pack(pady=20, padx=20, fill="both", expand=True)
+        main_frame = ctk.CTkFrame(self.root)
+        main_frame.pack(pady=20, padx=20, fill="both", expand=True)
 
         # Title frame
-        title_frame = ctk.CTkFrame(self.main_frame)
+        title_frame = ctk.CTkFrame(main_frame)
         title_frame.pack(fill="x", pady=(0, 10))
 
         ctk.CTkLabel(title_frame, text=f"{APP_NAME}", font=("Arial", 18, "bold")).pack(side="left", padx=10)
         ctk.CTkLabel(title_frame, text=f"v{VERSION}", font=("Arial", 12)).pack(side="right", padx=10)
 
         # Status frame
-        self.status_frame = ctk.CTkFrame(self.main_frame)
-        self.status_frame.pack(fill="x", pady=5)
+        status_frame = ctk.CTkFrame(main_frame)
+        status_frame.pack(fill="x", pady=5)
 
-        self.status_label = ctk.CTkLabel(self.status_frame, text="Status: Running", text_color="green")
+        self.status_label = ctk.CTkLabel(status_frame, text="Status: Running", text_color="green")
         self.status_label.pack(side="left", padx=10)
 
-        self.update_status_label = ctk.CTkLabel(
-            self.status_frame,
-            text="",
-            font=("Arial", 10)
-        )
-        self.update_status_label.pack(side="right", padx=10)
-
         # Stats frame
-        stats_frame = ctk.CTkFrame(self.main_frame)
+        stats_frame = ctk.CTkFrame(main_frame)
         stats_frame.pack(fill="x", pady=10)
 
         stats_grid = ctk.CTkFrame(stats_frame)
@@ -352,7 +292,7 @@ class GrammarPalApp:
         self.phrases_label.grid(row=1, column=1, sticky="w", padx=5, pady=2)
 
         # Settings frame
-        settings_frame = ctk.CTkFrame(self.main_frame)
+        settings_frame = ctk.CTkFrame(main_frame)
         settings_frame.pack(fill="x", pady=10)
 
         ctk.CTkLabel(settings_frame, text="Settings", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=5)
@@ -392,42 +332,14 @@ class GrammarPalApp:
             font=("Arial", 12)
         ).pack(anchor="w", padx=10, pady=5)
 
-        # Remote config toggle
-        self.remote_config_var = ctk.BooleanVar(value=self.config.get("remote_config_enabled", True))
-        ctk.CTkCheckBox(
-            settings_frame,
-            text="Enable remote configuration",
-            variable=self.remote_config_var,
-            command=self.toggle_remote_config,
-            font=("Arial", 12)
-        ).pack(anchor="w", padx=10, pady=5)
-
-        # Auto-update toggle
-        self.auto_update_var = ctk.BooleanVar(value=self.config.get("check_updates_on_startup", True))
-        ctk.CTkCheckBox(
-            settings_frame,
-            text="Check for updates on startup",
-            variable=self.auto_update_var,
-            command=self.toggle_auto_update,
-            font=("Arial", 12)
-        ).pack(anchor="w", padx=10, pady=5)
-
         # Buttons frame
-        buttons_frame = ctk.CTkFrame(self.main_frame)
+        buttons_frame = ctk.CTkFrame(main_frame)
         buttons_frame.pack(pady=10)
 
         ctk.CTkButton(
             buttons_frame,
             text="Reload Keywords",
             command=self.reload_keywords,
-            width=120,
-            height=30
-        ).pack(side="left", padx=10)
-
-        ctk.CTkButton(
-            buttons_frame,
-            text="Check for Updates",
-            command=self.check_for_updates_manual,
             width=120,
             height=30
         ).pack(side="left", padx=10)
@@ -448,7 +360,6 @@ class GrammarPalApp:
 
         menu = (
             pystray.MenuItem("Show", self.show_from_tray),
-            pystray.MenuItem("Check for Updates", self.check_for_updates_manual),
             pystray.MenuItem("Exit", self.quit_app)
         )
 
@@ -482,14 +393,16 @@ class GrammarPalApp:
     def toggle_start_minimized(self):
         self.config.set("start_minimized", self.start_minimized_var.get())
 
-    def toggle_remote_config(self):
-        self.config.set("remote_config_enabled", self.remote_config_var.get())
-
-    def toggle_auto_update(self):
-        self.config.set("check_updates_on_startup", self.auto_update_var.get())
-
     def load_keywords(self) -> List[str]:
-        return self.config.load_keywords()
+        try:
+            filename = self.config.get("keywords_file", DEFAULT_KEYWORDS_FILE)
+            with open(filename, 'r', encoding='utf-8') as f:
+                keywords = [line.strip() for line in f if line.strip()]
+                logging.info(f"Loaded {len(keywords)} keywords from {filename}")
+                return keywords
+        except Exception as e:
+            logging.error(f"Error loading keywords: {e}")
+            return []
 
     def reload_keywords(self):
         self.keywords = self.load_keywords()
@@ -598,161 +511,6 @@ class GrammarPalApp:
             logging.error(f"Correction failed: {e}")
         finally:
             self.suggestion_active = False
-
-    def check_for_updates_on_startup(self):
-        """Background update check on startup"""
-
-        def bg_check():
-            try:
-                update_info = self.updater.check_for_updates()
-                if update_info.get('available'):
-                    self.root.after(0, lambda: self.notify_update_available(update_info))
-            except Exception as e:
-                logging.error(f"Background update check failed: {e}")
-
-        threading.Thread(target=bg_check, daemon=True).start()
-
-    def check_for_updates_manual(self):
-        """Manual update check triggered by user"""
-        self.update_status_label.configure(text="Checking for updates...", text_color="blue")
-
-        def do_check():
-            try:
-                update_info = self.updater.check_for_updates()
-                if update_info.get('available'):
-                    self.root.after(0, lambda: self.prompt_update(update_info))
-                else:
-                    self.root.after(0, lambda: self.update_status_label.configure(
-                        text="You have the latest version",
-                        text_color="green"
-                    ))
-            except Exception as e:
-                self.root.after(0, lambda: self.update_status_label.configure(
-                    text=f"Update check failed: {str(e)}",
-                    text_color="red"
-                ))
-                logging.error(f"Manual update check failed: {e}")
-
-        threading.Thread(target=do_check, daemon=True).start()
-
-    def notify_update_available(self, update_info: dict):
-        """Show notification about available update"""
-        self.update_status_label.configure(
-            text=f"Update v{update_info['version']} available!",
-            text_color="orange"
-        )
-
-    def prompt_update(self, update_info: dict):
-        """Show update dialog"""
-        dialog = ctk.CTkToplevel(self.root)
-        dialog.title("Update Available")
-        dialog.geometry("500x300")
-        dialog.attributes("-topmost", True)
-
-        ctk.CTkLabel(
-            dialog,
-            text=f"Version {update_info['version']} is available!",
-            font=("Arial", 14, "bold")
-        ).pack(pady=10)
-
-        scroll_frame = ctk.CTkScrollableFrame(dialog)
-        scroll_frame.pack(pady=10, padx=10, fill="both", expand=True)
-
-        ctk.CTkLabel(
-            scroll_frame,
-            text=update_info.get('release_notes', 'No release notes available'),
-            justify="left",
-            wraplength=400
-        ).pack(anchor="w")
-
-        buttons_frame = ctk.CTkFrame(dialog)
-        buttons_frame.pack(pady=10)
-
-        ctk.CTkButton(
-            buttons_frame,
-            text="Update Now",
-            command=lambda: self.perform_update(update_info, dialog),
-            width=100
-        ).pack(side="left", padx=10)
-
-        ctk.CTkButton(
-            buttons_frame,
-            text="View Release",
-            command=lambda: webbrowser.open(update_info['html_url']),
-            width=100
-        ).pack(side="left", padx=10)
-
-        ctk.CTkButton(
-            buttons_frame,
-            text="Later",
-            command=dialog.destroy,
-            width=100
-        ).pack(side="left", padx=10)
-
-    def perform_update(self, update_info: dict, dialog: ctk.CTkToplevel):
-        """Download and apply the update"""
-        dialog.destroy()
-        self.update_status_label.configure(text="Downloading update...", text_color="blue")
-
-        progress_window = ctk.CTkToplevel(self.root)
-        progress_window.title("Updating...")
-        progress_window.geometry("400x150")
-        progress_window.attributes("-topmost", True)
-
-        progress_label = ctk.CTkLabel(
-            progress_window,
-            text="Downloading update...",
-            font=("Arial", 12)
-        )
-        progress_label.pack(pady=20)
-
-        progress_bar = ctk.CTkProgressBar(progress_window, width=300)
-        progress_bar.pack()
-        progress_bar.set(0)
-
-        def update_thread():
-            try:
-                # Find the asset to download (assuming it's a zip file)
-                asset = next(
-                    (a for a in update_info.get('assets', [])
-                     if a['name'].lower().endswith('.zip')),
-                    None
-                )
-
-                if not asset:
-                    raise Exception("No update package found in release")
-
-                # Download the update
-                self.root.after(0, lambda: progress_label.configure(text="Downloading update..."))
-                zip_path = self.updater.download_asset(asset['browser_download_url'])
-
-                # Apply the update
-                self.root.after(0, lambda: progress_label.configure(text="Applying update..."))
-                self.root.after(0, lambda: progress_bar.set(0.5))
-
-                target_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                success = self.updater.apply_update(zip_path, target_dir)
-
-                if success:
-                    self.root.after(0, lambda: progress_label.configure(text="Update complete! Restarting..."))
-                    self.root.after(0, lambda: progress_bar.set(1.0))
-                    time.sleep(2)
-                    self.updater.restart_application()
-                else:
-                    raise Exception("Update application failed")
-
-            except Exception as e:
-                self.root.after(0, lambda: progress_label.configure(
-                    text=f"Update failed: {str(e)}",
-                    text_color="red"
-                ))
-                logging.error(f"Update failed: {e}")
-                self.root.after(0, lambda: self.update_status_label.configure(
-                    text="Update failed",
-                    text_color="red"
-                ))
-
-        threading.Thread(target=update_thread, daemon=True).start()
 
     def quit_app(self):
         logging.info("Shutting down application")
