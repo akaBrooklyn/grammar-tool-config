@@ -18,11 +18,11 @@ from typing import List, Dict, Optional, Deque, Tuple
 
 # --- Constants ---
 APP_NAME = "GrammarPal"
-VERSION = "1.0.2"
+VERSION = "1.0.1"
 CONFIG_FILE = "config.json"
 DEFAULT_KEYWORDS_FILE = "keywords.txt"
 WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n'}
-MIN_SUGGESTIONS = 10
+MIN_SUGGESTIONS = 20
 MAX_SUGGESTIONS = 20
 
 
