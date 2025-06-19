@@ -24,7 +24,7 @@ DEFAULT_KEYWORDS_FILE = "keywords.txt"
 DICTIONARY_FILE = "dictionary.json"
 WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n', ')', '(', '[', ']', '{', '}', '/', '\\', '|', '"', "'"}
 MIN_SUGGESTIONS = 20
-MAX_SUGGESTIONS = 35
+MAX_SUGGESTIONS = 30
 MIN_PHRASE_LENGTH = 3
 
 # --- Setup Logging ---
