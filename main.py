@@ -49,7 +49,7 @@ class ConfigManager:
         default_config = {
             "keywords_file": DEFAULT_KEYWORDS_FILE,
             "suggestion_timeout": 8,
-            "max_phrase_length": 10,
+            "max_phrase_length": 25,
             "min_similarity": 0.5,
             "theme": "dark",
             "start_minimized": True,
@@ -273,7 +273,7 @@ class GrammarPalApp:
 
         # State variables
         self.typed_chars: List[str] = []
-        self.phrase_buffer: Deque[str] = deque(maxlen=self.config.get("max_phrase_length", 10))
+        self.phrase_buffer: Deque[str] = deque(maxlen=self.config.get("max_phrase_length", 25))
         self.suggestion_active: bool = False
         self.listener_running: bool = False
         self.last_focused_window: Optional[str] = None
