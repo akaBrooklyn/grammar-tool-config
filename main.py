@@ -18,16 +18,14 @@ from typing import List, Dict, Optional, Deque, Tuple
 
 # --- Constants ---
 APP_NAME = "GrammarPal"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 CONFIG_FILE = "config.json"
 DEFAULT_KEYWORDS_FILE = "keywords.txt"
 DICTIONARY_FILE = "dictionary.json"
-WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n', ')', '(', '[', ']', '{', '}', '/', '\\',
-                   '|', '"', "'"}
-MIN_SUGGESTIONS = 15
-MAX_SUGGESTIONS = 20
+WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n', ')', '(', '[', ']', '{', '}', '/', '\\', '|', '"', "'"}
+MIN_SUGGESTIONS = 5
+MAX_SUGGESTIONS = 15
 MIN_PHRASE_LENGTH = 3
-
 
 # --- Setup Logging ---
 def setup_logging():
@@ -37,11 +35,10 @@ def setup_logging():
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(os.path.join(log_dir, f"{APP_NAME.lower()}.log")),
+            logging.FileHandler(os.path.join(log_dir, f"{APP_NAME.lower()}.log"), encoding='utf-8'),
             logging.StreamHandler()
         ]
     )
-
 
 # --- Configuration Manager ---
 class ConfigManager:
@@ -60,12 +57,13 @@ class ConfigManager:
             "enable_auto_correct": False,
             "hotkey_force_suggest": "ctrl+alt+g",
             "min_phrase_length": MIN_PHRASE_LENGTH,
-            "show_definitions": True
+            "show_definitions": True,
+            "enable_sound": True
         }
 
         try:
             if os.path.exists(CONFIG_FILE):
-                with open(CONFIG_FILE, 'r') as f:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
                     return {**default_config, **loaded}
         except Exception as e:
@@ -75,8 +73,8 @@ class ConfigManager:
 
     def save_config(self):
         try:
-            with open(CONFIG_FILE, 'w') as f:
-                json.dump(self.config, f, indent=4)
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=4, ensure_ascii=False)
         except Exception as e:
             logging.error(f"Error saving config: {e}")
 
@@ -86,7 +84,6 @@ class ConfigManager:
     def set(self, key: str, value):
         self.config[key] = value
         self.save_config()
-
 
 # --- Grammar Engine ---
 class GrammarEngine:
@@ -118,16 +115,20 @@ class GrammarEngine:
     def load_dictionary(self) -> Dict[str, str]:
         try:
             if os.path.exists(DICTIONARY_FILE):
-                with open(DICTIONARY_FILE, 'r') as f:
+                with open(DICTIONARY_FILE, 'r', encoding='utf-8') as f:
                     return json.load(f)
+            return {}
+        except json.JSONDecodeError:
+            logging.warning("Dictionary file corrupted, creating new one")
+            return {}
         except Exception as e:
             logging.error(f"Dictionary load error: {e}")
-        return {}
+            return {}
 
     def save_dictionary(self):
         try:
-            with open(DICTIONARY_FILE, 'w') as f:
-                json.dump(self.dictionary, f, indent=2)
+            with open(DICTIONARY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.dictionary, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logging.error(f"Dictionary save error: {e}")
 
@@ -179,16 +180,15 @@ class GrammarEngine:
         sorted_matches = sorted(filtered, key=lambda x: (-x[1], len(x[0])))
 
         results = [self.original_map[phrase] for phrase, _ in sorted_matches[:MAX_SUGGESTIONS]]
-
+        
         if len(results) < MIN_SUGGESTIONS:
             remaining = [
-                            self.original_map[k] for k in self.keywords
-                            if self.original_map[k] not in results
-                        ][:MIN_SUGGESTIONS - len(results)]
+                self.original_map[k] for k in self.keywords
+                if self.original_map[k] not in results
+            ][:MIN_SUGGESTIONS - len(results)]
             results.extend(remaining)
 
         return results
-
 
 # --- Suggestion Popup ---
 class SuggestionPopup(ctk.CTkToplevel):
@@ -211,7 +211,7 @@ class SuggestionPopup(ctk.CTkToplevel):
         label.pack(pady=(0, 10))
 
         # Dictionary definition
-        if hasattr(self.master, 'ge') and phrase.lower() in self.master.ge.dictionary:
+        if hasattr(self.master, 'ge') and phrase.lower() in self.master.ge.dictionary and self.master.config.get("show_definitions", True):
             definition = self.master.ge.dictionary[phrase.lower()]
             def_frame = ctk.CTkFrame(container, fg_color=("gray90", "gray20"))
             def_frame.pack(fill="x", pady=(0, 10))
@@ -263,7 +263,6 @@ class SuggestionPopup(ctk.CTkToplevel):
         self.callback(self.phrase, correction)
         self.destroy()
 
-
 # --- Main Application ---
 class GrammarPalApp:
     def __init__(self):
@@ -300,7 +299,7 @@ class GrammarPalApp:
 
     def setup_ui(self):
         ctk.set_appearance_mode(self.config.get("theme", "dark"))
-        self.root.geometry("700x650")
+        self.root.geometry("750x700")
 
         # Main frame
         main_frame = ctk.CTkFrame(self.root)
@@ -327,13 +326,11 @@ class GrammarPalApp:
         stats_grid = ctk.CTkFrame(stats_frame)
         stats_grid.pack(pady=5)
 
-        ctk.CTkLabel(stats_grid, text="Keywords loaded:", font=("Arial", 12)).grid(row=0, column=0, sticky="w", padx=5,
-                                                                                   pady=2)
+        ctk.CTkLabel(stats_grid, text="Keywords loaded:", font=("Arial", 12)).grid(row=0, column=0, sticky="w", padx=5, pady=2)
         self.keywords_label = ctk.CTkLabel(stats_grid, text=str(len(self.keywords)), font=("Arial", 12, "bold"))
         self.keywords_label.grid(row=0, column=1, sticky="w", padx=5, pady=2)
 
-        ctk.CTkLabel(stats_grid, text="Dictionary words:", font=("Arial", 12)).grid(row=1, column=0, sticky="w", padx=5,
-                                                                                    pady=2)
+        ctk.CTkLabel(stats_grid, text="Dictionary words:", font=("Arial", 12)).grid(row=1, column=0, sticky="w", padx=5, pady=2)
         self.dict_label = ctk.CTkLabel(stats_grid, text=str(len(self.ge.dictionary)), font=("Arial", 12, "bold"))
         self.dict_label.grid(row=1, column=1, sticky="w", padx=5, pady=2)
 
@@ -341,8 +338,7 @@ class GrammarPalApp:
         dict_frame = ctk.CTkFrame(main_frame)
         dict_frame.pack(fill="x", pady=10)
 
-        ctk.CTkLabel(dict_frame, text="Dictionary Tool", font=("Arial", 14, "bold")).pack(anchor="w", padx=10,
-                                                                                          pady=(0, 5))
+        ctk.CTkLabel(dict_frame, text="Dictionary Tool", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(0, 5))
 
         dict_input_frame = ctk.CTkFrame(dict_frame)
         dict_input_frame.pack(fill="x", padx=10, pady=5)
@@ -374,6 +370,15 @@ class GrammarPalApp:
             text="Lookup Word",
             command=self.lookup_word,
             width=150
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            dict_action_frame,
+            text="Remove Word",
+            command=self.remove_from_dictionary,
+            width=150,
+            fg_color="#d9534f",
+            hover_color="#c9302c"
         ).pack(side="left", padx=5)
 
         # Settings frame
@@ -452,6 +457,14 @@ class GrammarPalApp:
             command=self.toggle_start_minimized
         ).pack(side="left", padx=10)
 
+        self.enable_sound_var = ctk.BooleanVar(value=self.config.get("enable_sound", True))
+        ctk.CTkCheckBox(
+            check_frame,
+            text="Enable sounds",
+            variable=self.enable_sound_var,
+            command=self.toggle_enable_sound
+        ).pack(side="left", padx=10)
+
         # Buttons frame
         buttons_frame = ctk.CTkFrame(main_frame)
         buttons_frame.pack(pady=10)
@@ -460,6 +473,14 @@ class GrammarPalApp:
             buttons_frame,
             text="Reload Keywords",
             command=self.reload_keywords,
+            width=120,
+            height=30
+        ).pack(side="left", padx=10)
+
+        ctk.CTkButton(
+            buttons_frame,
+            text="Export Dictionary",
+            command=self.export_dictionary,
             width=120,
             height=30
         ).pack(side="left", padx=10)
@@ -507,6 +528,9 @@ class GrammarPalApp:
     def toggle_start_minimized(self):
         self.config.set("start_minimized", self.start_minimized_var.get())
 
+    def toggle_enable_sound(self):
+        self.config.set("enable_sound", self.enable_sound_var.get())
+
     def update_hotkey(self):
         new_hotkey = self.hotkey_var.get().strip().lower()
         if new_hotkey:
@@ -530,8 +554,18 @@ class GrammarPalApp:
     def add_to_dictionary(self):
         word = self.dict_word.get().strip().lower()
         definition = self.dict_def.get().strip()
+        
+        if not word:
+            self.status_label.configure(text="Error: Word cannot be empty", text_color="red")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            return
+            
+        if not definition:
+            self.status_label.configure(text="Error: Definition cannot be empty", text_color="red")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            return
 
-        if word and definition:
+        try:
             self.ge.dictionary[word] = definition
             self.ge.save_dictionary()
             self.dict_label.configure(text=str(len(self.ge.dictionary)))
@@ -539,6 +573,10 @@ class GrammarPalApp:
             self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
             self.dict_word.set("")
             self.dict_def.set("")
+        except Exception as e:
+            logging.error(f"Error adding to dictionary: {e}")
+            self.status_label.configure(text="Error saving dictionary", text_color="red")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
 
     def lookup_word(self):
         word = self.dict_word.get().strip().lower()
@@ -548,6 +586,32 @@ class GrammarPalApp:
             self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
         else:
             self.status_label.configure(text=f"'{word}' not in dictionary", text_color="orange")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+
+    def remove_from_dictionary(self):
+        word = self.dict_word.get().strip().lower()
+        if word in self.ge.dictionary:
+            del self.ge.dictionary[word]
+            self.ge.save_dictionary()
+            self.dict_label.configure(text=str(len(self.ge.dictionary)))
+            self.status_label.configure(text=f"Removed '{word}' from dictionary", text_color="blue")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.dict_word.set("")
+            self.dict_def.set("")
+        else:
+            self.status_label.configure(text=f"'{word}' not in dictionary", text_color="orange")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+
+    def export_dictionary(self):
+        try:
+            export_file = "grammarpal_dictionary_export.json"
+            with open(export_file, 'w', encoding='utf-8') as f:
+                json.dump(self.ge.dictionary, f, indent=2, ensure_ascii=False)
+            self.status_label.configure(text=f"Dictionary exported to {export_file}", text_color="blue")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+        except Exception as e:
+            logging.error(f"Error exporting dictionary: {e}")
+            self.status_label.configure(text="Error exporting dictionary", text_color="red")
             self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
 
     def load_keywords(self) -> List[str]:
@@ -687,7 +751,6 @@ class GrammarPalApp:
 
     def run(self):
         self.root.mainloop()
-
 
 if __name__ == "__main__":
     app = GrammarPalApp()
