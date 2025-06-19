@@ -18,14 +18,16 @@ from typing import List, Dict, Optional, Deque, Tuple
 
 # --- Constants ---
 APP_NAME = "GrammarPal"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 CONFIG_FILE = "config.json"
 DEFAULT_KEYWORDS_FILE = "keywords.txt"
 DICTIONARY_FILE = "dictionary.json"
-WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n', ')', '(', '[', ']', '{', '}', '/', '\\', '|', '"', "'"}
+WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n', ')', '(', '[', ']', '{', '}', '/', '\\',
+                   '|', '"', "'"}
 MIN_SUGGESTIONS = 20
 MAX_SUGGESTIONS = 30
 MIN_PHRASE_LENGTH = 3
+
 
 # --- Setup Logging ---
 def setup_logging():
@@ -40,6 +42,7 @@ def setup_logging():
         ]
     )
 
+
 # --- Configuration Manager ---
 class ConfigManager:
     def __init__(self):
@@ -49,7 +52,7 @@ class ConfigManager:
         default_config = {
             "keywords_file": DEFAULT_KEYWORDS_FILE,
             "suggestion_timeout": 8,
-            "max_phrase_length": 25,
+            "max_phrase_length": 20,
             "min_similarity": 0.5,
             "theme": "dark",
             "start_minimized": True,
@@ -84,6 +87,7 @@ class ConfigManager:
     def set(self, key: str, value):
         self.config[key] = value
         self.save_config()
+
 
 # --- Grammar Engine ---
 class GrammarEngine:
@@ -180,15 +184,16 @@ class GrammarEngine:
         sorted_matches = sorted(filtered, key=lambda x: (-x[1], len(x[0])))
 
         results = [self.original_map[phrase] for phrase, _ in sorted_matches[:MAX_SUGGESTIONS]]
-        
+
         if len(results) < MIN_SUGGESTIONS:
             remaining = [
-                self.original_map[k] for k in self.keywords
-                if self.original_map[k] not in results
-            ][:MIN_SUGGESTIONS - len(results)]
+                            self.original_map[k] for k in self.keywords
+                            if self.original_map[k] not in results
+                        ][:MIN_SUGGESTIONS - len(results)]
             results.extend(remaining)
 
         return results
+
 
 # --- Suggestion Popup ---
 class SuggestionPopup(ctk.CTkToplevel):
@@ -211,7 +216,8 @@ class SuggestionPopup(ctk.CTkToplevel):
         label.pack(pady=(0, 10))
 
         # Dictionary definition
-        if hasattr(self.master, 'ge') and phrase.lower() in self.master.ge.dictionary and self.master.config.get("show_definitions", True):
+        if hasattr(self.master, 'ge') and phrase.lower() in self.master.ge.dictionary and self.master.config.get(
+                "show_definitions", True):
             definition = self.master.ge.dictionary[phrase.lower()]
             def_frame = ctk.CTkFrame(container, fg_color=("gray90", "gray20"))
             def_frame.pack(fill="x", pady=(0, 10))
@@ -263,6 +269,7 @@ class SuggestionPopup(ctk.CTkToplevel):
         self.callback(self.phrase, correction)
         self.destroy()
 
+
 # --- Main Application ---
 class GrammarPalApp:
     def __init__(self):
@@ -273,7 +280,7 @@ class GrammarPalApp:
 
         # State variables
         self.typed_chars: List[str] = []
-        self.phrase_buffer: Deque[str] = deque(maxlen=self.config.get("max_phrase_length", 25))
+        self.phrase_buffer: Deque[str] = deque(maxlen=self.config.get("max_phrase_length", 10))
         self.suggestion_active: bool = False
         self.listener_running: bool = False
         self.last_focused_window: Optional[str] = None
@@ -326,11 +333,13 @@ class GrammarPalApp:
         stats_grid = ctk.CTkFrame(stats_frame)
         stats_grid.pack(pady=5)
 
-        ctk.CTkLabel(stats_grid, text="Keywords loaded:", font=("Arial", 12)).grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ctk.CTkLabel(stats_grid, text="Keywords loaded:", font=("Arial", 12)).grid(row=0, column=0, sticky="w", padx=5,
+                                                                                   pady=2)
         self.keywords_label = ctk.CTkLabel(stats_grid, text=str(len(self.keywords)), font=("Arial", 12, "bold"))
         self.keywords_label.grid(row=0, column=1, sticky="w", padx=5, pady=2)
 
-        ctk.CTkLabel(stats_grid, text="Dictionary words:", font=("Arial", 12)).grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ctk.CTkLabel(stats_grid, text="Dictionary words:", font=("Arial", 12)).grid(row=1, column=0, sticky="w", padx=5,
+                                                                                    pady=2)
         self.dict_label = ctk.CTkLabel(stats_grid, text=str(len(self.ge.dictionary)), font=("Arial", 12, "bold"))
         self.dict_label.grid(row=1, column=1, sticky="w", padx=5, pady=2)
 
@@ -338,7 +347,8 @@ class GrammarPalApp:
         dict_frame = ctk.CTkFrame(main_frame)
         dict_frame.pack(fill="x", pady=10)
 
-        ctk.CTkLabel(dict_frame, text="Dictionary Tool", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=(0, 5))
+        ctk.CTkLabel(dict_frame, text="Dictionary Tool", font=("Arial", 14, "bold")).pack(anchor="w", padx=10,
+                                                                                          pady=(0, 5))
 
         dict_input_frame = ctk.CTkFrame(dict_frame)
         dict_input_frame.pack(fill="x", padx=10, pady=5)
@@ -554,12 +564,12 @@ class GrammarPalApp:
     def add_to_dictionary(self):
         word = self.dict_word.get().strip().lower()
         definition = self.dict_def.get().strip()
-        
+
         if not word:
             self.status_label.configure(text="Error: Word cannot be empty", text_color="red")
             self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
             return
-            
+
         if not definition:
             self.status_label.configure(text="Error: Definition cannot be empty", text_color="red")
             self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
@@ -751,6 +761,7 @@ class GrammarPalApp:
 
     def run(self):
         self.root.mainloop()
+
 
 if __name__ == "__main__":
     app = GrammarPalApp()
