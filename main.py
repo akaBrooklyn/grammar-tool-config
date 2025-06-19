@@ -18,12 +18,15 @@ from typing import List, Dict, Optional, Deque, Tuple
 
 # --- Constants ---
 APP_NAME = "GrammarPal"
-VERSION = "1.0.1"
+VERSION = "1.2.0"
 CONFIG_FILE = "config.json"
 DEFAULT_KEYWORDS_FILE = "keywords.txt"
-WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n'}
-MIN_SUGGESTIONS = 10
-MAX_SUGGESTIONS = 20
+DICTIONARY_FILE = "dictionary.json"
+WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n', ')', '(', '[', ']', '{', '}', '/', '\\',
+                   '|', '"', "'"}
+MIN_SUGGESTIONS = 5
+MAX_SUGGESTIONS = 15
+MIN_PHRASE_LENGTH = 3
 
 
 # --- Setup Logging ---
@@ -50,11 +53,14 @@ class ConfigManager:
             "keywords_file": DEFAULT_KEYWORDS_FILE,
             "suggestion_timeout": 8,
             "max_phrase_length": 10,
-            "recent_phrases_size": 50,
             "min_similarity": 0.5,
             "theme": "dark",
             "start_minimized": True,
-            "enable_partial_matching": True
+            "enable_partial_matching": True,
+            "enable_auto_correct": False,
+            "hotkey_force_suggest": "ctrl+alt+g",
+            "min_phrase_length": MIN_PHRASE_LENGTH,
+            "show_definitions": True
         }
 
         try:
@@ -88,6 +94,7 @@ class GrammarEngine:
         self.keywords = [self.normalize_text(k) for k in keywords]
         self.original_map = {self.normalize_text(k): k for k in keywords}
         self.word_index = self.build_word_index()
+        self.dictionary = self.load_dictionary()
 
     @staticmethod
     def normalize_text(text: str) -> str:
@@ -98,7 +105,6 @@ class GrammarEngine:
         return text.strip()
 
     def build_word_index(self) -> Dict[str, List[str]]:
-        """Create an index of individual words to their full phrases"""
         index = {}
         for phrase in self.keywords:
             words = phrase.split()
@@ -109,20 +115,34 @@ class GrammarEngine:
                     index[word].append(phrase)
         return index
 
+    def load_dictionary(self) -> Dict[str, str]:
+        try:
+            if os.path.exists(DICTIONARY_FILE):
+                with open(DICTIONARY_FILE, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            logging.error(f"Dictionary load error: {e}")
+        return {}
+
+    def save_dictionary(self):
+        try:
+            with open(DICTIONARY_FILE, 'w') as f:
+                json.dump(self.dictionary, f, indent=2)
+        except Exception as e:
+            logging.error(f"Dictionary save error: {e}")
+
     def check_phrase(self, phrase: str, min_similarity: float = 0.5, partial_matching: bool = True) -> List[str]:
         norm_phrase = self.normalize_text(phrase)
-
-        # Get matches through multiple methods
         all_matches = []
 
-        # 1. Exact prefix matches (highest priority)
+        # 1. Exact prefix matches
         prefix_matches = [
             (k, 1.0) for k in self.keywords
             if k.startswith(norm_phrase) and k != norm_phrase
         ]
         all_matches.extend(prefix_matches)
 
-        # 2. Partial word matches (if enabled)
+        # 2. Partial word matches
         if partial_matching:
             input_words = norm_phrase.split()
             if input_words:
@@ -135,7 +155,7 @@ class GrammarEngine:
                     common_words = set(input_words) & set(candidate.split())
                     score = len(common_words) / len(input_words)
                     if score >= 0.5:
-                        all_matches.append((candidate, score * 0.9))  # Slightly lower than exact matches
+                        all_matches.append((candidate, score * 0.9))
 
         # 3. Similarity matches
         similarity_matches = [
@@ -145,13 +165,12 @@ class GrammarEngine:
         ]
         all_matches.extend(similarity_matches)
 
-        # Combine and deduplicate matches
+        # Process matches
         unique_matches = {}
         for phrase, score in all_matches:
             if phrase not in unique_matches or score > unique_matches[phrase]:
                 unique_matches[phrase] = score
 
-        # Filter by minimum similarity and sort
         filtered = [
             (phrase, score)
             for phrase, score in unique_matches.items()
@@ -159,10 +178,8 @@ class GrammarEngine:
         ]
         sorted_matches = sorted(filtered, key=lambda x: (-x[1], len(x[0])))
 
-        # Get original phrases for top matches
         results = [self.original_map[phrase] for phrase, _ in sorted_matches[:MAX_SUGGESTIONS]]
 
-        # Ensure minimum suggestions
         if len(results) < MIN_SUGGESTIONS:
             remaining = [
                             self.original_map[k] for k in self.keywords
@@ -179,31 +196,60 @@ class SuggestionPopup(ctk.CTkToplevel):
         super().__init__()
         self.phrase = phrase
         self.callback = callback
-        self.title(f"{APP_NAME} - Suggestion")
+        self.title(f"{APP_NAME} - Suggestions")
         self.attributes("-topmost", True)
-        self.geometry(self._center_geometry(400, 50 + 40 * min(len(suggestions), 10)))
+        self.geometry(self._center_geometry(450, min(600, 50 + 40 * min(len(suggestions), 10))))
         self.resizable(False, False)
 
-        # Limit displayed phrase length
+        # Main container
+        container = ctk.CTkFrame(self)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Phrase display
         display_phrase = phrase[:50] + ('...' if len(phrase) > 50 else '')
+        label = ctk.CTkLabel(container, text=f"Did you mean instead of: '{display_phrase}'")
+        label.pack(pady=(0, 10))
 
-        label = ctk.CTkLabel(self, text=f"Did you mean instead of: '{display_phrase}'")
-        label.pack(pady=10)
+        # Dictionary definition
+        if hasattr(self.master, 'ge') and phrase.lower() in self.master.ge.dictionary:
+            definition = self.master.ge.dictionary[phrase.lower()]
+            def_frame = ctk.CTkFrame(container, fg_color=("gray90", "gray20"))
+            def_frame.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(def_frame, text="Definition:", font=("Arial", 12, "bold")).pack(anchor="w")
+            ctk.CTkLabel(
+                def_frame,
+                text=definition,
+                wraplength=400,
+                justify="left"
+            ).pack(fill="x", padx=5, pady=5)
 
-        # Create a scrollable frame for suggestions
-        scroll_frame = ctk.CTkScrollableFrame(self, height=min(300, 35 * len(suggestions)))
-        scroll_frame.pack(pady=5, padx=10, fill="both", expand=True)
+        # Suggestions scrollable area
+        scroll_frame = ctk.CTkScrollableFrame(container, height=min(300, 35 * len(suggestions)))
+        scroll_frame.pack(fill="both", expand=True)
 
-        for sug in suggestions[:20]:  # Show max 10 suggestions
+        for sug in suggestions[:20]:
             btn = ctk.CTkButton(
                 scroll_frame,
                 text=sug,
                 command=lambda s=sug: self.select(s),
                 anchor="w",
-                width=380,
+                width=420,
                 height=30
             )
             btn.pack(pady=2, fill="x")
+
+        # Bottom buttons
+        btn_frame = ctk.CTkFrame(container)
+        btn_frame.pack(fill="x", pady=(10, 0))
+
+        ctk.CTkButton(
+            btn_frame,
+            text="Ignore",
+            command=self.destroy,
+            fg_color="gray",
+            hover_color="darkgray",
+            width=100
+        ).pack(side="right", padx=5)
 
         self.after(timeout * 1000, self.destroy)
 
@@ -229,10 +275,10 @@ class GrammarPalApp:
         # State variables
         self.typed_chars: List[str] = []
         self.phrase_buffer: Deque[str] = deque(maxlen=self.config.get("max_phrase_length", 10))
-        self.recent_phrases: Deque[str] = deque(maxlen=self.config.get("recent_phrases_size", 50))
         self.suggestion_active: bool = False
         self.listener_running: bool = False
         self.last_focused_window: Optional[str] = None
+        self.force_suggest_mode: bool = False
 
         # Initialize UI
         self.root = ctk.CTk()
@@ -254,7 +300,7 @@ class GrammarPalApp:
 
     def setup_ui(self):
         ctk.set_appearance_mode(self.config.get("theme", "dark"))
-        self.root.geometry("600x500")
+        self.root.geometry("700x650")
 
         # Main frame
         main_frame = ctk.CTkFrame(self.root)
@@ -286,10 +332,49 @@ class GrammarPalApp:
         self.keywords_label = ctk.CTkLabel(stats_grid, text=str(len(self.keywords)), font=("Arial", 12, "bold"))
         self.keywords_label.grid(row=0, column=1, sticky="w", padx=5, pady=2)
 
-        ctk.CTkLabel(stats_grid, text="Recent phrases:", font=("Arial", 12)).grid(row=1, column=0, sticky="w", padx=5,
-                                                                                  pady=2)
-        self.phrases_label = ctk.CTkLabel(stats_grid, text=str(len(self.recent_phrases)), font=("Arial", 12, "bold"))
-        self.phrases_label.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+        ctk.CTkLabel(stats_grid, text="Dictionary words:", font=("Arial", 12)).grid(row=1, column=0, sticky="w", padx=5,
+                                                                                    pady=2)
+        self.dict_label = ctk.CTkLabel(stats_grid, text=str(len(self.ge.dictionary)), font=("Arial", 12, "bold"))
+        self.dict_label.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+
+        # Dictionary frame
+        dict_frame = ctk.CTkFrame(main_frame)
+        dict_frame.pack(fill="x", pady=10)
+
+        ctk.CTkLabel(dict_frame, text="Dictionary Tool", font=("Arial", 14, "bold")).pack(anchor="w", padx=10,
+                                                                                          pady=(0, 5))
+
+        dict_input_frame = ctk.CTkFrame(dict_frame)
+        dict_input_frame.pack(fill="x", padx=10, pady=5)
+
+        self.dict_word = ctk.StringVar()
+        self.dict_def = ctk.StringVar()
+
+        ctk.CTkLabel(dict_input_frame, text="Word:", width=80).pack(side="left")
+        ctk.CTkEntry(dict_input_frame, textvariable=self.dict_word).pack(side="left", fill="x", expand=True, padx=5)
+
+        dict_btn_frame = ctk.CTkFrame(dict_frame)
+        dict_btn_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+        ctk.CTkLabel(dict_btn_frame, text="Definition:", width=80).pack(side="left")
+        ctk.CTkEntry(dict_btn_frame, textvariable=self.dict_def).pack(side="left", fill="x", expand=True, padx=5)
+
+        dict_action_frame = ctk.CTkFrame(dict_frame)
+        dict_action_frame.pack(fill="x", padx=10, pady=5)
+
+        ctk.CTkButton(
+            dict_action_frame,
+            text="Add to Dictionary",
+            command=self.add_to_dictionary,
+            width=150
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            dict_action_frame,
+            text="Lookup Word",
+            command=self.lookup_word,
+            width=150
+        ).pack(side="left", padx=5)
 
         # Settings frame
         settings_frame = ctk.CTkFrame(main_frame)
@@ -312,25 +397,60 @@ class GrammarPalApp:
         )
         theme_menu.pack(side="left")
 
-        # Partial matching toggle
+        # Hotkey frame
+        hotkey_frame = ctk.CTkFrame(settings_frame)
+        hotkey_frame.pack(fill="x", padx=10, pady=5)
+
+        ctk.CTkLabel(hotkey_frame, text="Force suggestion hotkey:", font=("Arial", 12)).pack(side="left", padx=5)
+        self.hotkey_var = ctk.StringVar(value=self.config.get("hotkey_force_suggest", "ctrl+alt+g"))
+        hotkey_entry = ctk.CTkEntry(
+            hotkey_frame,
+            textvariable=self.hotkey_var,
+            width=120
+        )
+        hotkey_entry.pack(side="left", padx=5)
+        ctk.CTkButton(
+            hotkey_frame,
+            text="Set",
+            command=self.update_hotkey,
+            width=50
+        ).pack(side="left", padx=5)
+
+        # Checkboxes frame
+        check_frame = ctk.CTkFrame(settings_frame)
+        check_frame.pack(fill="x", padx=10, pady=5)
+
         self.partial_match_var = ctk.BooleanVar(value=self.config.get("enable_partial_matching", True))
         ctk.CTkCheckBox(
-            settings_frame,
-            text="Enable partial word matching",
+            check_frame,
+            text="Partial word matching",
             variable=self.partial_match_var,
-            command=self.toggle_partial_matching,
-            font=("Arial", 12)
-        ).pack(anchor="w", padx=10, pady=5)
+            command=self.toggle_partial_matching
+        ).pack(side="left", padx=10)
 
-        # Start minimized toggle
+        self.auto_correct_var = ctk.BooleanVar(value=self.config.get("enable_auto_correct", False))
+        ctk.CTkCheckBox(
+            check_frame,
+            text="Auto-correct",
+            variable=self.auto_correct_var,
+            command=self.toggle_auto_correct
+        ).pack(side="left", padx=10)
+
+        self.show_def_var = ctk.BooleanVar(value=self.config.get("show_definitions", True))
+        ctk.CTkCheckBox(
+            check_frame,
+            text="Show definitions",
+            variable=self.show_def_var,
+            command=self.toggle_show_definitions
+        ).pack(side="left", padx=10)
+
         self.start_minimized_var = ctk.BooleanVar(value=self.config.get("start_minimized", True))
         ctk.CTkCheckBox(
-            settings_frame,
-            text="Start minimized to tray",
+            check_frame,
+            text="Start minimized",
             variable=self.start_minimized_var,
-            command=self.toggle_start_minimized,
-            font=("Arial", 12)
-        ).pack(anchor="w", padx=10, pady=5)
+            command=self.toggle_start_minimized
+        ).pack(side="left", padx=10)
 
         # Buttons frame
         buttons_frame = ctk.CTkFrame(main_frame)
@@ -355,26 +475,14 @@ class GrammarPalApp:
         ).pack(side="left", padx=10)
 
     def create_tray_icon(self):
-        # Create a simple icon image
         image = Image.new('RGB', (64, 64), color='blue')
-
         menu = (
             pystray.MenuItem("Show", self.show_from_tray),
+            pystray.MenuItem("Force Suggestion", self.force_suggestion),
             pystray.MenuItem("Exit", self.quit_app)
         )
-
-        icon = pystray.Icon(
-            APP_NAME,
-            image,
-            f"{APP_NAME} {VERSION}",
-            menu
-        )
-
-        threading.Thread(
-            target=icon.run,
-            daemon=True
-        ).start()
-
+        icon = pystray.Icon(APP_NAME, image, f"{APP_NAME} {VERSION}", menu)
+        threading.Thread(target=icon.run, daemon=True).start()
         return icon
 
     def show_from_tray(self):
@@ -390,8 +498,57 @@ class GrammarPalApp:
     def toggle_partial_matching(self):
         self.config.set("enable_partial_matching", self.partial_match_var.get())
 
+    def toggle_auto_correct(self):
+        self.config.set("enable_auto_correct", self.auto_correct_var.get())
+
+    def toggle_show_definitions(self):
+        self.config.set("show_definitions", self.show_def_var.get())
+
     def toggle_start_minimized(self):
         self.config.set("start_minimized", self.start_minimized_var.get())
+
+    def update_hotkey(self):
+        new_hotkey = self.hotkey_var.get().strip().lower()
+        if new_hotkey:
+            try:
+                keyboard.remove_hotkey(self.config.get("hotkey_force_suggest", "ctrl+alt+g"))
+                keyboard.add_hotkey(new_hotkey, self.force_suggestion)
+                self.config.set("hotkey_force_suggest", new_hotkey)
+                self.status_label.configure(text="Status: Hotkey Updated", text_color="blue")
+                self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            except Exception as e:
+                logging.error(f"Error setting hotkey: {e}")
+                self.status_label.configure(text="Status: Hotkey Error", text_color="red")
+                self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+
+    def force_suggestion(self):
+        if self.phrase_buffer:
+            phrase = ' '.join(self.phrase_buffer)
+            self.force_suggest_mode = True
+            self.on_phrase_completed(phrase)
+
+    def add_to_dictionary(self):
+        word = self.dict_word.get().strip().lower()
+        definition = self.dict_def.get().strip()
+
+        if word and definition:
+            self.ge.dictionary[word] = definition
+            self.ge.save_dictionary()
+            self.dict_label.configure(text=str(len(self.ge.dictionary)))
+            self.status_label.configure(text=f"Added '{word}' to dictionary", text_color="blue")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.dict_word.set("")
+            self.dict_def.set("")
+
+    def lookup_word(self):
+        word = self.dict_word.get().strip().lower()
+        if word in self.ge.dictionary:
+            self.dict_def.set(self.ge.dictionary[word])
+            self.status_label.configure(text=f"Found definition for '{word}'", text_color="blue")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+        else:
+            self.status_label.configure(text=f"'{word}' not in dictionary", text_color="orange")
+            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
 
     def load_keywords(self) -> List[str]:
         try:
@@ -416,6 +573,10 @@ class GrammarPalApp:
         if not self.listener_running:
             keyboard.unhook_all()
             keyboard.on_press(self.on_key_press)
+            keyboard.add_hotkey(
+                self.config.get("hotkey_force_suggest", "ctrl+alt+g"),
+                self.force_suggestion
+            )
             self.listener_running = True
             logging.info("Keyboard listener started")
 
@@ -423,7 +584,6 @@ class GrammarPalApp:
         name = event.name
 
         if len(name) == 1 and name.isprintable():
-            # Skip if the character is a digit (number)
             if name.isdigit():
                 self.typed_chars.clear()
                 return
@@ -432,13 +592,12 @@ class GrammarPalApp:
             if self.typed_chars:
                 word = ''.join(self.typed_chars).strip()
                 self.typed_chars.clear()
-                if word:
-                    # Skip if the word contains any digits
-                    if any(c.isdigit() for c in word):
-                        return
+                if word and not any(c.isdigit() for c in word):
                     self.phrase_buffer.append(word)
                     self.suggestion_active = False
                     self.check_combinations()
+                    if len(self.phrase_buffer) == self.phrase_buffer.maxlen:
+                        self.phrase_buffer.popleft()
         elif name == 'backspace' and self.typed_chars:
             self.typed_chars.pop()
 
@@ -446,14 +605,14 @@ class GrammarPalApp:
         for n in range(4, 0, -1):
             if len(self.phrase_buffer) >= n:
                 phrase = ' '.join(list(self.phrase_buffer)[-n:])
-                norm_phrase = GrammarEngine.normalize_text(phrase)
-                if norm_phrase not in self.recent_phrases:
-                    # Skip if the phrase contains any digits
-                    if not any(c.isdigit() for c in phrase):
-                        self.on_phrase_completed(phrase)
+                if len(phrase) >= self.config.get("min_phrase_length", MIN_PHRASE_LENGTH):
+                    self.on_phrase_completed(phrase)
 
     def on_phrase_completed(self, phrase: str):
-        if self.suggestion_active:
+        if self.suggestion_active and not self.force_suggest_mode:
+            return
+
+        if len(phrase) < self.config.get("min_phrase_length", MIN_PHRASE_LENGTH):
             return
 
         min_similarity = self.config.get("min_similarity", 0.5)
@@ -461,8 +620,6 @@ class GrammarPalApp:
         suggestions = self.ge.check_phrase(phrase, min_similarity, partial_matching)
 
         if suggestions:
-            norm_phrase = GrammarEngine.normalize_text(phrase)
-            self.recent_phrases.append(norm_phrase)
             self.suggestion_active = True
             logging.info(f"Match found: '{phrase}' → {suggestions[:3]}... (Total: {len(suggestions)})")
 
@@ -484,8 +641,7 @@ class GrammarPalApp:
                 ),
                 daemon=True
             ).start()
-
-            self.root.after(0, lambda: self.phrases_label.configure(text=str(len(self.recent_phrases))))
+            self.force_suggest_mode = False
 
     def apply_correction(self, original: str, correction: str):
         try:
@@ -533,7 +689,6 @@ class GrammarPalApp:
         self.root.mainloop()
 
 
-# --- Main Entry Point ---
 if __name__ == "__main__":
     app = GrammarPalApp()
     app.run()
