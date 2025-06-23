@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import pystray
+import winsound
 from collections import deque
 from difflib import SequenceMatcher
 from PIL import Image
@@ -22,11 +23,16 @@ VERSION = "1.2.0"
 CONFIG_FILE = "config.json"
 DEFAULT_KEYWORDS_FILE = "keywords.txt"
 DICTIONARY_FILE = "dictionary.json"
+HISTORY_FILE = "correction_history.json"
 WORD_BOUNDARIES = {'space', 'enter', 'tab', '.', ',', '?', '!', ';', ':', '\n', ')', '(', '[', ']', '{', '}', '/', '\\',
                    '|', '"', "'"}
 MIN_SUGGESTIONS = 20
 MAX_SUGGESTIONS = 30
 MIN_PHRASE_LENGTH = 3
+MAX_HISTORY_ITEMS = 100
+DEFAULT_HOTKEY = "ctrl+alt+g"
+BEEP_FREQ = 1000  # Hz
+BEEP_DUR = 200  # ms
 
 
 # --- Setup Logging ---
@@ -58,10 +64,15 @@ class ConfigManager:
             "start_minimized": True,
             "enable_partial_matching": True,
             "enable_auto_correct": False,
-            "hotkey_force_suggest": "ctrl+alt+g",
+            "hotkey_force_suggest": DEFAULT_HOTKEY,
             "min_phrase_length": MIN_PHRASE_LENGTH,
             "show_definitions": True,
-            "enable_sound": True
+            "enable_sound": True,
+            "enable_history": True,
+            "auto_save_history": True,
+            "max_history_items": MAX_HISTORY_ITEMS,
+            "enable_word_learning": True,
+            "show_notifications": True
         }
 
         try:
@@ -96,6 +107,8 @@ class GrammarEngine:
         self.original_map = {self.normalize_text(k): k for k in keywords}
         self.word_index = self.build_word_index()
         self.dictionary = self.load_dictionary()
+        self.history = self.load_history()
+        self.learned_words = set()
 
     @staticmethod
     def normalize_text(text: str) -> str:
@@ -135,6 +148,34 @@ class GrammarEngine:
                 json.dump(self.dictionary, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logging.error(f"Dictionary save error: {e}")
+
+    def load_history(self) -> List[Dict]:
+        try:
+            if os.path.exists(HISTORY_FILE):
+                with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return []
+        except Exception as e:
+            logging.error(f"History load error: {e}")
+            return []
+
+    def save_history(self):
+        try:
+            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self.history[-MAX_HISTORY_ITEMS:], f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logging.error(f"History save error: {e}")
+
+    def add_to_history(self, original: str, correction: str):
+        entry = {
+            "timestamp": time.time(),
+            "original": original,
+            "correction": correction,
+            "learned": False
+        }
+        self.history.append(entry)
+        if self.config.get("auto_save_history", True):
+            self.save_history()
 
     def check_phrase(self, phrase: str, min_similarity: float = 0.5, partial_matching: bool = True) -> List[str]:
         norm_phrase = self.normalize_text(phrase)
@@ -194,13 +235,23 @@ class GrammarEngine:
 
         return results
 
+    def learn_word(self, word: str):
+        """Add a word to the learned words set"""
+        norm_word = self.normalize_text(word)
+        self.learned_words.add(norm_word)
+        # Update history if this word was corrected before
+        for entry in self.history:
+            if self.normalize_text(entry["original"]) == norm_word:
+                entry["learned"] = True
+
 
 # --- Suggestion Popup ---
 class SuggestionPopup(ctk.CTkToplevel):
-    def __init__(self, phrase: str, suggestions: List[str], callback, timeout: int = 8):
+    def __init__(self, phrase: str, suggestions: List[str], callback, ignore_callback, timeout: int = 8):
         super().__init__()
         self.phrase = phrase
         self.callback = callback
+        self.ignore_callback = ignore_callback
         self.title(f"{APP_NAME} - Suggestions")
         self.attributes("-topmost", True)
         self.geometry(self._center_geometry(450, min(600, 50 + 40 * min(len(suggestions), 10))))
@@ -251,11 +302,21 @@ class SuggestionPopup(ctk.CTkToplevel):
         ctk.CTkButton(
             btn_frame,
             text="Ignore",
-            command=self.destroy,
+            command=self.on_ignore,
             fg_color="gray",
             hover_color="darkgray",
             width=100
         ).pack(side="right", padx=5)
+
+        if hasattr(self.master, 'config') and self.master.config.get("enable_word_learning", True):
+            ctk.CTkButton(
+                btn_frame,
+                text="Learn Word",
+                command=self.learn_word,
+                fg_color="#5bc0de",
+                hover_color="#46b8da",
+                width=100
+            ).pack(side="right", padx=5)
 
         self.after(timeout * 1000, self.destroy)
 
@@ -269,6 +330,120 @@ class SuggestionPopup(ctk.CTkToplevel):
         self.callback(self.phrase, correction)
         self.destroy()
 
+    def on_ignore(self):
+        if self.ignore_callback:
+            self.ignore_callback(self.phrase)
+        self.destroy()
+
+    def learn_word(self):
+        if hasattr(self.master, 'ge'):
+            self.master.ge.learn_word(self.phrase)
+            if hasattr(self.master, 'show_notification'):
+                self.master.show_notification(f"Learned word: {self.phrase}")
+        self.destroy()
+
+
+# --- History Window ---
+class HistoryWindow(ctk.CTkToplevel):
+    def __init__(self, history: List[Dict]):
+        super().__init__()
+        self.title(f"{APP_NAME} - Correction History")
+        self.geometry("800x600")
+        self.history = history
+
+        # Main container
+        container = ctk.CTkFrame(self)
+        container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Title
+        ctk.CTkLabel(container, text="Correction History", font=("Arial", 16, "bold")).pack(pady=(0, 10))
+
+        # Search frame
+        search_frame = ctk.CTkFrame(container)
+        search_frame.pack(fill="x", pady=(0, 10))
+
+        self.search_var = ctk.StringVar()
+        search_entry = ctk.CTkEntry(
+            search_frame,
+            textvariable=self.search_var,
+            placeholder_text="Search history...",
+            width=300
+        )
+        search_entry.pack(side="left", padx=5)
+        search_entry.bind("<KeyRelease>", lambda e: self.filter_history())
+
+        ctk.CTkButton(
+            search_frame,
+            text="Clear History",
+            command=self.clear_history,
+            fg_color="#d9534f",
+            hover_color="#c9302c",
+            width=120
+        ).pack(side="right", padx=5)
+
+        ctk.CTkButton(
+            search_frame,
+            text="Refresh",
+            command=self.refresh_history,
+            width=80
+        ).pack(side="right", padx=5)
+
+        # History list
+        self.history_frame = ctk.CTkScrollableFrame(container)
+        self.history_frame.pack(fill="both", expand=True)
+
+        self.refresh_history()
+
+    def filter_history(self):
+        search_term = self.search_var.get().lower()
+        for widget in self.history_frame.winfo_children():
+            widget.destroy()
+
+        for entry in self.history:
+            if (search_term in entry["original"].lower() or
+                    search_term in entry["correction"].lower() or
+                    not search_term):
+                self._add_history_entry(entry)
+
+    def refresh_history(self):
+        for widget in self.history_frame.winfo_children():
+            widget.destroy()
+
+        for entry in self.history:
+            self._add_history_entry(entry)
+
+    def _add_history_entry(self, entry: Dict):
+        entry_frame = ctk.CTkFrame(self.history_frame)
+        entry_frame.pack(fill="x", pady=2)
+
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry["timestamp"]))
+        ctk.CTkLabel(
+            entry_frame,
+            text=timestamp,
+            width=150
+        ).pack(side="left", padx=5)
+
+        ctk.CTkLabel(
+            entry_frame,
+            text=f"'{entry['original']}' → '{entry['correction']}'",
+            width=400,
+            anchor="w"
+        ).pack(side="left", padx=5)
+
+        if entry.get("learned", False):
+            ctk.CTkLabel(
+                entry_frame,
+                text="✓",
+                text_color="green",
+                width=20
+            ).pack(side="right", padx=5)
+
+    def clear_history(self):
+        if hasattr(self.master, 'ge'):
+            self.master.ge.history = []
+            self.master.ge.save_history()
+            self.refresh_history()
+
 
 # --- Main Application ---
 class GrammarPalApp:
@@ -277,6 +452,7 @@ class GrammarPalApp:
         self.config = ConfigManager()
         self.keywords = self.load_keywords()
         self.ge = GrammarEngine(self.keywords)
+        self.ge.config = self.config  # Pass config to grammar engine
 
         # State variables
         self.typed_chars: List[str] = []
@@ -306,7 +482,7 @@ class GrammarPalApp:
 
     def setup_ui(self):
         ctk.set_appearance_mode(self.config.get("theme", "dark"))
-        self.root.geometry("750x700")
+        self.root.geometry("800x850")
 
         # Main frame
         main_frame = ctk.CTkFrame(self.root)
@@ -342,6 +518,11 @@ class GrammarPalApp:
                                                                                     pady=2)
         self.dict_label = ctk.CTkLabel(stats_grid, text=str(len(self.ge.dictionary)), font=("Arial", 12, "bold"))
         self.dict_label.grid(row=1, column=1, sticky="w", padx=5, pady=2)
+
+        ctk.CTkLabel(stats_grid, text="History items:", font=("Arial", 12)).grid(row=2, column=0, sticky="w", padx=5,
+                                                                                 pady=2)
+        self.history_label = ctk.CTkLabel(stats_grid, text=str(len(self.ge.history)), font=("Arial", 12, "bold"))
+        self.history_label.grid(row=2, column=1, sticky="w", padx=5, pady=2)
 
         # Dictionary frame
         dict_frame = ctk.CTkFrame(main_frame)
@@ -391,6 +572,38 @@ class GrammarPalApp:
             hover_color="#c9302c"
         ).pack(side="left", padx=5)
 
+        # History frame
+        history_frame = ctk.CTkFrame(main_frame)
+        history_frame.pack(fill="x", pady=10)
+
+        ctk.CTkLabel(history_frame, text="History Tools", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=5)
+
+        history_btn_frame = ctk.CTkFrame(history_frame)
+        history_btn_frame.pack(fill="x", padx=10, pady=5)
+
+        ctk.CTkButton(
+            history_btn_frame,
+            text="View History",
+            command=self.view_history,
+            width=150
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            history_btn_frame,
+            text="Export History",
+            command=self.export_history,
+            width=150
+        ).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            history_btn_frame,
+            text="Clear History",
+            command=self.clear_history,
+            width=150,
+            fg_color="#d9534f",
+            hover_color="#c9302c"
+        ).pack(side="left", padx=5)
+
         # Settings frame
         settings_frame = ctk.CTkFrame(main_frame)
         settings_frame.pack(fill="x", pady=10)
@@ -417,7 +630,7 @@ class GrammarPalApp:
         hotkey_frame.pack(fill="x", padx=10, pady=5)
 
         ctk.CTkLabel(hotkey_frame, text="Force suggestion hotkey:", font=("Arial", 12)).pack(side="left", padx=5)
-        self.hotkey_var = ctk.StringVar(value=self.config.get("hotkey_force_suggest", "ctrl+alt+g"))
+        self.hotkey_var = ctk.StringVar(value=self.config.get("hotkey_force_suggest", DEFAULT_HOTKEY))
         hotkey_entry = ctk.CTkEntry(
             hotkey_frame,
             textvariable=self.hotkey_var,
@@ -459,9 +672,13 @@ class GrammarPalApp:
             command=self.toggle_show_definitions
         ).pack(side="left", padx=10)
 
+        # Second row of checkboxes
+        check_frame2 = ctk.CTkFrame(settings_frame)
+        check_frame2.pack(fill="x", padx=10, pady=5)
+
         self.start_minimized_var = ctk.BooleanVar(value=self.config.get("start_minimized", True))
         ctk.CTkCheckBox(
-            check_frame,
+            check_frame2,
             text="Start minimized",
             variable=self.start_minimized_var,
             command=self.toggle_start_minimized
@@ -469,10 +686,46 @@ class GrammarPalApp:
 
         self.enable_sound_var = ctk.BooleanVar(value=self.config.get("enable_sound", True))
         ctk.CTkCheckBox(
-            check_frame,
+            check_frame2,
             text="Enable sounds",
             variable=self.enable_sound_var,
             command=self.toggle_enable_sound
+        ).pack(side="left", padx=10)
+
+        self.enable_history_var = ctk.BooleanVar(value=self.config.get("enable_history", True))
+        ctk.CTkCheckBox(
+            check_frame2,
+            text="Enable history",
+            variable=self.enable_history_var,
+            command=self.toggle_enable_history
+        ).pack(side="left", padx=10)
+
+        # Third row of checkboxes
+        check_frame3 = ctk.CTkFrame(settings_frame)
+        check_frame3.pack(fill="x", padx=10, pady=5)
+
+        self.auto_save_history_var = ctk.BooleanVar(value=self.config.get("auto_save_history", True))
+        ctk.CTkCheckBox(
+            check_frame3,
+            text="Auto-save history",
+            variable=self.auto_save_history_var,
+            command=self.toggle_auto_save_history
+        ).pack(side="left", padx=10)
+
+        self.word_learning_var = ctk.BooleanVar(value=self.config.get("enable_word_learning", True))
+        ctk.CTkCheckBox(
+            check_frame3,
+            text="Word learning",
+            variable=self.word_learning_var,
+            command=self.toggle_word_learning
+        ).pack(side="left", padx=10)
+
+        self.show_notifications_var = ctk.BooleanVar(value=self.config.get("show_notifications", True))
+        ctk.CTkCheckBox(
+            check_frame3,
+            text="Show notifications",
+            variable=self.show_notifications_var,
+            command=self.toggle_show_notifications
         ).pack(side="left", padx=10)
 
         # Buttons frame
@@ -510,6 +763,7 @@ class GrammarPalApp:
         menu = (
             pystray.MenuItem("Show", self.show_from_tray),
             pystray.MenuItem("Force Suggestion", self.force_suggestion),
+            pystray.MenuItem("View History", self.view_history),
             pystray.MenuItem("Exit", self.quit_app)
         )
         icon = pystray.Icon(APP_NAME, image, f"{APP_NAME} {VERSION}", menu)
@@ -541,15 +795,26 @@ class GrammarPalApp:
     def toggle_enable_sound(self):
         self.config.set("enable_sound", self.enable_sound_var.get())
 
+    def toggle_enable_history(self):
+        self.config.set("enable_history", self.enable_history_var.get())
+
+    def toggle_auto_save_history(self):
+        self.config.set("auto_save_history", self.auto_save_history_var.get())
+
+    def toggle_word_learning(self):
+        self.config.set("enable_word_learning", self.word_learning_var.get())
+
+    def toggle_show_notifications(self):
+        self.config.set("show_notifications", self.show_notifications_var.get())
+
     def update_hotkey(self):
         new_hotkey = self.hotkey_var.get().strip().lower()
         if new_hotkey:
             try:
-                keyboard.remove_hotkey(self.config.get("hotkey_force_suggest", "ctrl+alt+g"))
+                keyboard.remove_hotkey(self.config.get("hotkey_force_suggest", DEFAULT_HOTKEY))
                 keyboard.add_hotkey(new_hotkey, self.force_suggestion)
                 self.config.set("hotkey_force_suggest", new_hotkey)
-                self.status_label.configure(text="Status: Hotkey Updated", text_color="blue")
-                self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+                self.show_notification(f"Hotkey updated to {new_hotkey}")
             except Exception as e:
                 logging.error(f"Error setting hotkey: {e}")
                 self.status_label.configure(text="Status: Hotkey Error", text_color="red")
@@ -566,37 +831,31 @@ class GrammarPalApp:
         definition = self.dict_def.get().strip()
 
         if not word:
-            self.status_label.configure(text="Error: Word cannot be empty", text_color="red")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification("Error: Word cannot be empty", is_error=True)
             return
 
         if not definition:
-            self.status_label.configure(text="Error: Definition cannot be empty", text_color="red")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification("Error: Definition cannot be empty", is_error=True)
             return
 
         try:
             self.ge.dictionary[word] = definition
             self.ge.save_dictionary()
             self.dict_label.configure(text=str(len(self.ge.dictionary)))
-            self.status_label.configure(text=f"Added '{word}' to dictionary", text_color="blue")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification(f"Added '{word}' to dictionary")
             self.dict_word.set("")
             self.dict_def.set("")
         except Exception as e:
             logging.error(f"Error adding to dictionary: {e}")
-            self.status_label.configure(text="Error saving dictionary", text_color="red")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification("Error saving dictionary", is_error=True)
 
     def lookup_word(self):
         word = self.dict_word.get().strip().lower()
         if word in self.ge.dictionary:
             self.dict_def.set(self.ge.dictionary[word])
-            self.status_label.configure(text=f"Found definition for '{word}'", text_color="blue")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification(f"Found definition for '{word}'")
         else:
-            self.status_label.configure(text=f"'{word}' not in dictionary", text_color="orange")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification(f"'{word}' not in dictionary", is_warning=True)
 
     def remove_from_dictionary(self):
         word = self.dict_word.get().strip().lower()
@@ -604,25 +863,40 @@ class GrammarPalApp:
             del self.ge.dictionary[word]
             self.ge.save_dictionary()
             self.dict_label.configure(text=str(len(self.ge.dictionary)))
-            self.status_label.configure(text=f"Removed '{word}' from dictionary", text_color="blue")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification(f"Removed '{word}' from dictionary")
             self.dict_word.set("")
             self.dict_def.set("")
         else:
-            self.status_label.configure(text=f"'{word}' not in dictionary", text_color="orange")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification(f"'{word}' not in dictionary", is_warning=True)
 
     def export_dictionary(self):
         try:
             export_file = "grammarpal_dictionary_export.json"
             with open(export_file, 'w', encoding='utf-8') as f:
                 json.dump(self.ge.dictionary, f, indent=2, ensure_ascii=False)
-            self.status_label.configure(text=f"Dictionary exported to {export_file}", text_color="blue")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification(f"Dictionary exported to {export_file}")
         except Exception as e:
             logging.error(f"Error exporting dictionary: {e}")
-            self.status_label.configure(text="Error exporting dictionary", text_color="red")
-            self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+            self.show_notification("Error exporting dictionary", is_error=True)
+
+    def view_history(self):
+        HistoryWindow(self.ge.history)
+
+    def export_history(self):
+        try:
+            export_file = "grammarpal_history_export.json"
+            with open(export_file, 'w', encoding='utf-8') as f:
+                json.dump(self.ge.history, f, indent=2, ensure_ascii=False)
+            self.show_notification(f"History exported to {export_file}")
+        except Exception as e:
+            logging.error(f"Error exporting history: {e}")
+            self.show_notification("Error exporting history", is_error=True)
+
+    def clear_history(self):
+        self.ge.history = []
+        self.ge.save_history()
+        self.history_label.configure(text="0")
+        self.show_notification("History cleared")
 
     def load_keywords(self) -> List[str]:
         try:
@@ -638,17 +912,16 @@ class GrammarPalApp:
     def reload_keywords(self):
         self.keywords = self.load_keywords()
         self.ge = GrammarEngine(self.keywords)
+        self.ge.config = self.config
         self.keywords_label.configure(text=str(len(self.keywords)))
-        logging.info("Keywords reloaded")
-        self.status_label.configure(text="Status: Keywords Reloaded", text_color="blue")
-        self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
+        self.show_notification("Keywords reloaded")
 
     def start_keyboard_listener(self):
         if not self.listener_running:
             keyboard.unhook_all()
             keyboard.on_press(self.on_key_press)
             keyboard.add_hotkey(
-                self.config.get("hotkey_force_suggest", "ctrl+alt+g"),
+                self.config.get("hotkey_force_suggest", DEFAULT_HOTKEY),
                 self.force_suggestion
             )
             self.listener_running = True
@@ -689,6 +962,10 @@ class GrammarPalApp:
         if len(phrase) < self.config.get("min_phrase_length", MIN_PHRASE_LENGTH):
             return
 
+        # Skip learned words
+        if self.config.get("enable_word_learning", True) and self.ge.normalize_text(phrase) in self.ge.learned_words:
+            return
+
         min_similarity = self.config.get("min_similarity", 0.5)
         partial_matching = self.config.get("enable_partial_matching", True)
         suggestions = self.ge.check_phrase(phrase, min_similarity, partial_matching)
@@ -711,15 +988,35 @@ class GrammarPalApp:
                     phrase,
                     suggestions,
                     self.apply_correction,
+                    self.clear_phrase_buffer,
                     timeout
                 ),
                 daemon=True
             ).start()
             self.force_suggest_mode = False
 
+    def clear_phrase_buffer(self, phrase: str):
+        """Clear the phrase buffer when a suggestion is ignored"""
+        words_to_remove = phrase.split()
+        # Remove the words from the buffer
+        for word in words_to_remove:
+            try:
+                self.phrase_buffer.remove(word)
+            except ValueError:
+                pass
+        self.suggestion_active = False
+
     def apply_correction(self, original: str, correction: str):
         try:
             logging.info(f"Applying correction: '{original}' → '{correction}'")
+
+            # Play sound if enabled
+            if self.config.get("enable_sound", True):
+                try:
+                    winsound.Beep(BEEP_FREQ, BEEP_DUR)
+                except Exception as e:
+                    logging.warning(f"Couldn't play sound: {e}")
+
             time.sleep(0.2)
 
             if self.last_focused_window:
@@ -743,13 +1040,34 @@ class GrammarPalApp:
             pyautogui.hotkey('ctrl', 'v')
             time.sleep(0.05)
 
+            # Add to history
+            if self.config.get("enable_history", True):
+                self.ge.add_to_history(original, correction)
+                self.history_label.configure(text=str(len(self.ge.history)))
+
+            # Clear buffers
             self.typed_chars.clear()
             self.phrase_buffer.clear()
 
         except Exception as e:
             logging.error(f"Correction failed: {e}")
+            self.show_notification("Correction failed", is_error=True)
         finally:
             self.suggestion_active = False
+
+    def show_notification(self, message: str, is_error: bool = False, is_warning: bool = False):
+        """Show a status notification"""
+        if not self.config.get("show_notifications", True):
+            return
+
+        if is_error:
+            self.status_label.configure(text=f"Error: {message}", text_color="red")
+        elif is_warning:
+            self.status_label.configure(text=f"Warning: {message}", text_color="orange")
+        else:
+            self.status_label.configure(text=message, text_color="blue")
+
+        self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
 
     def quit_app(self):
         logging.info("Shutting down application")
