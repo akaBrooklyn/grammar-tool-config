@@ -19,7 +19,7 @@ from typing import List, Dict, Optional, Deque, Tuple
 
 # --- Constants ---
 APP_NAME = "GrammarPal"
-VERSION = "1.2.0"
+VERSION = "1.4.0"
 CONFIG_FILE = "config.json"
 DEFAULT_KEYWORDS_FILE = "keywords.txt"
 DICTIONARY_FILE = "dictionary.json"
@@ -72,7 +72,8 @@ class ConfigManager:
             "auto_save_history": True,
             "max_history_items": MAX_HISTORY_ITEMS,
             "enable_word_learning": True,
-            "show_notifications": True
+            "show_notifications": True,
+            "enable_keyboard_nav": True
         }
 
         try:
@@ -247,15 +248,25 @@ class GrammarEngine:
 
 # --- Suggestion Popup ---
 class SuggestionPopup(ctk.CTkToplevel):
-    def __init__(self, phrase: str, suggestions: List[str], callback, ignore_callback, timeout: int = 8):
+    def __init__(self, phrase: str, suggestions: List[str], callback, ignore_callback, config: Dict, timeout: int = 8):
         super().__init__()
         self.phrase = phrase
         self.callback = callback
         self.ignore_callback = ignore_callback
+        self.config = config
+        self.suggestions = suggestions
+        self.selected_index = -1
         self.title(f"{APP_NAME} - Suggestions")
         self.attributes("-topmost", True)
         self.geometry(self._center_geometry(450, min(600, 50 + 40 * min(len(suggestions), 10))))
         self.resizable(False, False)
+
+        # Bind keyboard events
+        if self.config.get("enable_keyboard_nav", True):
+            self.bind("<Up>", self._select_previous)
+            self.bind("<Down>", self._select_next)
+            self.bind("<Return>", self._select_current)
+            self.bind("<Escape>", lambda e: self.on_ignore())
 
         # Main container
         container = ctk.CTkFrame(self)
@@ -267,7 +278,7 @@ class SuggestionPopup(ctk.CTkToplevel):
         label.pack(pady=(0, 10))
 
         # Dictionary definition
-        if hasattr(self.master, 'ge') and phrase.lower() in self.master.ge.dictionary and self.master.config.get(
+        if hasattr(self.master, 'ge') and phrase.lower() in self.master.ge.dictionary and self.config.get(
                 "show_definitions", True):
             definition = self.master.ge.dictionary[phrase.lower()]
             def_frame = ctk.CTkFrame(container, fg_color=("gray90", "gray20"))
@@ -281,12 +292,13 @@ class SuggestionPopup(ctk.CTkToplevel):
             ).pack(fill="x", padx=5, pady=5)
 
         # Suggestions scrollable area
-        scroll_frame = ctk.CTkScrollableFrame(container, height=min(300, 35 * len(suggestions)))
-        scroll_frame.pack(fill="both", expand=True)
+        self.scroll_frame = ctk.CTkScrollableFrame(container, height=min(300, 35 * len(suggestions)))
+        self.scroll_frame.pack(fill="both", expand=True)
 
-        for sug in suggestions[:20]:
+        self.suggestion_buttons = []
+        for i, sug in enumerate(suggestions[:20]):
             btn = ctk.CTkButton(
-                scroll_frame,
+                self.scroll_frame,
                 text=sug,
                 command=lambda s=sug: self.select(s),
                 anchor="w",
@@ -294,6 +306,7 @@ class SuggestionPopup(ctk.CTkToplevel):
                 height=30
             )
             btn.pack(pady=2, fill="x")
+            self.suggestion_buttons.append(btn)
 
         # Bottom buttons
         btn_frame = ctk.CTkFrame(container)
@@ -308,7 +321,7 @@ class SuggestionPopup(ctk.CTkToplevel):
             width=100
         ).pack(side="right", padx=5)
 
-        if hasattr(self.master, 'config') and self.master.config.get("enable_word_learning", True):
+        if self.config.get("enable_word_learning", True):
             ctk.CTkButton(
                 btn_frame,
                 text="Learn Word",
@@ -319,12 +332,42 @@ class SuggestionPopup(ctk.CTkToplevel):
             ).pack(side="right", padx=5)
 
         self.after(timeout * 1000, self.destroy)
+        self.focus_set()
 
     def _center_geometry(self, w: int, h: int) -> str:
         screen_width, screen_height = pyautogui.size()
         x = (screen_width - w) // 2
         y = (screen_height - h) // 2
         return f"{w}x{h}+{x}+{y}"
+
+    def _select_previous(self, event=None):
+        if len(self.suggestion_buttons) == 0:
+            return
+        if self.selected_index > 0:
+            self.selected_index -= 1
+        else:
+            self.selected_index = len(self.suggestion_buttons) - 1
+        self._highlight_selected()
+
+    def _select_next(self, event=None):
+        if len(self.suggestion_buttons) == 0:
+            return
+        if self.selected_index < len(self.suggestion_buttons) - 1:
+            self.selected_index += 1
+        else:
+            self.selected_index = 0
+        self._highlight_selected()
+
+    def _select_current(self, event=None):
+        if 0 <= self.selected_index < len(self.suggestion_buttons):
+            self.select(self.suggestions[self.selected_index])
+
+    def _highlight_selected(self):
+        for i, btn in enumerate(self.suggestion_buttons):
+            if i == self.selected_index:
+                btn.configure(fg_color="#3a7ebf", hover_color="#1f538d")
+            else:
+                btn.configure(fg_color=("gray85", "gray25"), hover_color=("gray75", "gray35"))
 
     def select(self, correction: str):
         self.callback(self.phrase, correction)
@@ -338,7 +381,7 @@ class SuggestionPopup(ctk.CTkToplevel):
     def learn_word(self):
         if hasattr(self.master, 'ge'):
             self.master.ge.learn_word(self.phrase)
-            if hasattr(self.master, 'show_notification'):
+            if self.config.get("show_notifications", True):
                 self.master.show_notification(f"Learned word: {self.phrase}")
         self.destroy()
 
@@ -728,6 +771,14 @@ class GrammarPalApp:
             command=self.toggle_show_notifications
         ).pack(side="left", padx=10)
 
+        self.keyboard_nav_var = ctk.BooleanVar(value=self.config.get("enable_keyboard_nav", True))
+        ctk.CTkCheckBox(
+            check_frame3,
+            text="Keyboard navigation",
+            variable=self.keyboard_nav_var,
+            command=self.toggle_keyboard_nav
+        ).pack(side="left", padx=10)
+
         # Buttons frame
         buttons_frame = ctk.CTkFrame(main_frame)
         buttons_frame.pack(pady=10)
@@ -806,6 +857,9 @@ class GrammarPalApp:
 
     def toggle_show_notifications(self):
         self.config.set("show_notifications", self.show_notifications_var.get())
+
+    def toggle_keyboard_nav(self):
+        self.config.set("enable_keyboard_nav", self.keyboard_nav_var.get())
 
     def update_hotkey(self):
         new_hotkey = self.hotkey_var.get().strip().lower()
@@ -989,6 +1043,7 @@ class GrammarPalApp:
                     suggestions,
                     self.apply_correction,
                     self.clear_phrase_buffer,
+                    self.config.config,
                     timeout
                 ),
                 daemon=True
