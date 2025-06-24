@@ -20,7 +20,7 @@ from typing import List, Dict, Optional, Deque, Tuple
 
 # --- Constants ---
 APP_NAME = "GrammarPal"
-VERSION = "1.5.0"
+VERSION = "1.2.0"
 CONFIG_FILE = "config.json"
 DEFAULT_KEYWORDS_FILE = "keywords.txt"
 DICTIONARY_FILE = "dictionary.json"
