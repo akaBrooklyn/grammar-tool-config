@@ -12,7 +12,6 @@ import logging
 import os
 import pystray
 import winsound
-import webbrowser
 from collections import deque
 from difflib import SequenceMatcher
 from PIL import Image
@@ -34,13 +33,6 @@ MAX_HISTORY_ITEMS = 100
 DEFAULT_HOTKEY = "ctrl+alt+g"
 BEEP_FREQ = 1000  # Hz
 BEEP_DUR = 200  # ms
-GOOGLE_SEARCH_URL = "https://www.google.com/search?q="
-SEARCH_ENGINES = {
-    "Google": "https://www.google.com/search?q=",
-    "Bing": "https://www.bing.com/search?q=",
-    "DuckDuckGo": "https://duckduckgo.com/?q=",
-    "Yahoo": "https://search.yahoo.com/search?p="
-}
 
 
 # --- Setup Logging ---
@@ -81,11 +73,7 @@ class ConfigManager:
             "max_history_items": MAX_HISTORY_ITEMS,
             "enable_word_learning": True,
             "show_notifications": True,
-            "enable_keyboard_nav": True,
-            "enable_web_search": True,
-            "search_engine": "Google",
-            "web_search_keyword": "search",
-            "clear_buffer_after_search": True
+            "enable_keyboard_nav": True
         }
 
         try:
@@ -303,19 +291,6 @@ class SuggestionPopup(ctk.CTkToplevel):
                 justify="left"
             ).pack(fill="x", padx=5, pady=5)
 
-        # Web search button if enabled
-        if self.config.get("enable_web_search", True):
-            search_frame = ctk.CTkFrame(container)
-            search_frame.pack(fill="x", pady=(0, 10))
-            ctk.CTkButton(
-                search_frame,
-                text=f"Search on {self.config.get('search_engine', 'Google')}",
-                command=self.search_web,
-                fg_color="#4285F4",
-                hover_color="#3367D6",
-                width=200
-            ).pack(pady=5)
-
         # Suggestions scrollable area
         self.scroll_frame = ctk.CTkScrollableFrame(container, height=min(300, 35 * len(suggestions)))
         self.scroll_frame.pack(fill="both", expand=True)
@@ -409,13 +384,6 @@ class SuggestionPopup(ctk.CTkToplevel):
             if self.config.get("show_notifications", True):
                 self.master.show_notification(f"Learned word: {self.phrase}")
         self.destroy()
-
-    def search_web(self):
-        """Open web browser with search query"""
-        search_engine = SEARCH_ENGINES.get(self.config.get("search_engine", "Google"), GOOGLE_SEARCH_URL)
-        webbrowser.open_new_tab(search_engine + self.phrase.replace(" ", "+"))
-        if self.config.get("clear_buffer_after_search", True):
-            self.on_ignore()
 
 
 # --- History Window ---
@@ -536,7 +504,6 @@ class GrammarPalApp:
         self.listener_running: bool = False
         self.last_focused_window: Optional[str] = None
         self.force_suggest_mode: bool = False
-        self.web_search_mode: bool = False
 
         # Initialize UI
         self.root = ctk.CTk()
@@ -680,44 +647,6 @@ class GrammarPalApp:
             hover_color="#c9302c"
         ).pack(side="left", padx=5)
 
-        # Web search frame
-        web_frame = ctk.CTkFrame(main_frame)
-        web_frame.pack(fill="x", pady=10)
-
-        ctk.CTkLabel(web_frame, text="Web Search", font=("Arial", 14, "bold")).pack(anchor="w", padx=10, pady=5)
-
-        web_search_frame = ctk.CTkFrame(web_frame)
-        web_search_frame.pack(fill="x", padx=10, pady=5)
-
-        ctk.CTkLabel(web_search_frame, text="Search Engine:", font=("Arial", 12)).pack(side="left", padx=5)
-        self.search_engine_var = ctk.StringVar(value=self.config.get("search_engine", "Google"))
-        search_engine_menu = ctk.CTkOptionMenu(
-            web_search_frame,
-            values=list(SEARCH_ENGINES.keys()),
-            variable=self.search_engine_var,
-            command=self.change_search_engine,
-            width=120
-        )
-        search_engine_menu.pack(side="left", padx=5)
-
-        web_keyword_frame = ctk.CTkFrame(web_frame)
-        web_keyword_frame.pack(fill="x", padx=10, pady=5)
-
-        ctk.CTkLabel(web_keyword_frame, text="Search Keyword:", font=("Arial", 12)).pack(side="left", padx=5)
-        self.web_keyword_var = ctk.StringVar(value=self.config.get("web_search_keyword", "search"))
-        web_keyword_entry = ctk.CTkEntry(
-            web_keyword_frame,
-            textvariable=self.web_keyword_var,
-            width=120
-        )
-        web_keyword_entry.pack(side="left", padx=5)
-        ctk.CTkButton(
-            web_keyword_frame,
-            text="Set",
-            command=self.update_web_keyword,
-            width=50
-        ).pack(side="left", padx=5)
-
         # Settings frame
         settings_frame = ctk.CTkFrame(main_frame)
         settings_frame.pack(fill="x", pady=10)
@@ -814,14 +743,6 @@ class GrammarPalApp:
             command=self.toggle_enable_history
         ).pack(side="left", padx=10)
 
-        self.enable_web_var = ctk.BooleanVar(value=self.config.get("enable_web_search", True))
-        ctk.CTkCheckBox(
-            check_frame2,
-            text="Enable web search",
-            variable=self.enable_web_var,
-            command=self.toggle_enable_web_search
-        ).pack(side="left", padx=10)
-
         # Third row of checkboxes
         check_frame3 = ctk.CTkFrame(settings_frame)
         check_frame3.pack(fill="x", padx=10, pady=5)
@@ -856,14 +777,6 @@ class GrammarPalApp:
             text="Keyboard navigation",
             variable=self.keyboard_nav_var,
             command=self.toggle_keyboard_nav
-        ).pack(side="left", padx=10)
-
-        self.clear_buffer_var = ctk.BooleanVar(value=self.config.get("clear_buffer_after_search", True))
-        ctk.CTkCheckBox(
-            check_frame3,
-            text="Clear buffer after search",
-            variable=self.clear_buffer_var,
-            command=self.toggle_clear_buffer
         ).pack(side="left", padx=10)
 
         # Buttons frame
@@ -902,7 +815,6 @@ class GrammarPalApp:
             pystray.MenuItem("Show", self.show_from_tray),
             pystray.MenuItem("Force Suggestion", self.force_suggestion),
             pystray.MenuItem("View History", self.view_history),
-            pystray.MenuItem("Quick Search", self.quick_web_search),
             pystray.MenuItem("Exit", self.quit_app)
         )
         icon = pystray.Icon(APP_NAME, image, f"{APP_NAME} {VERSION}", menu)
@@ -910,7 +822,7 @@ class GrammarPalApp:
         return icon
 
     def show_from_tray(self):
-        self.root.after(0, self.root.deiconify())
+        self.root.after(0, self.root.deiconify)
 
     def minimize_to_tray(self):
         self.root.withdraw()
@@ -918,9 +830,6 @@ class GrammarPalApp:
     def change_theme(self, choice):
         ctk.set_appearance_mode(choice)
         self.config.set("theme", choice)
-
-    def change_search_engine(self, choice):
-        self.config.set("search_engine", choice)
 
     def toggle_partial_matching(self):
         self.config.set("enable_partial_matching", self.partial_match_var.get())
@@ -940,9 +849,6 @@ class GrammarPalApp:
     def toggle_enable_history(self):
         self.config.set("enable_history", self.enable_history_var.get())
 
-    def toggle_enable_web_search(self):
-        self.config.set("enable_web_search", self.enable_web_var.get())
-
     def toggle_auto_save_history(self):
         self.config.set("auto_save_history", self.auto_save_history_var.get())
 
@@ -954,9 +860,6 @@ class GrammarPalApp:
 
     def toggle_keyboard_nav(self):
         self.config.set("enable_keyboard_nav", self.keyboard_nav_var.get())
-
-    def toggle_clear_buffer(self):
-        self.config.set("clear_buffer_after_search", self.clear_buffer_var.get())
 
     def update_hotkey(self):
         new_hotkey = self.hotkey_var.get().strip().lower()
@@ -971,23 +874,10 @@ class GrammarPalApp:
                 self.status_label.configure(text="Status: Hotkey Error", text_color="red")
                 self.root.after(3000, lambda: self.status_label.configure(text="Status: Running", text_color="green"))
 
-    def update_web_keyword(self):
-        new_keyword = self.web_keyword_var.get().strip().lower()
-        if new_keyword:
-            self.config.set("web_search_keyword", new_keyword)
-            self.show_notification(f"Web search keyword updated to '{new_keyword}'")
-
     def force_suggestion(self):
         if self.phrase_buffer:
             phrase = ' '.join(self.phrase_buffer)
             self.force_suggest_mode = True
-            self.on_phrase_completed(phrase)
-
-    def quick_web_search(self):
-        """Trigger web search from tray menu"""
-        if self.phrase_buffer:
-            phrase = ' '.join(self.phrase_buffer)
-            self.web_search_mode = True
             self.on_phrase_completed(phrase)
 
     def add_to_dictionary(self):
@@ -1104,12 +994,6 @@ class GrammarPalApp:
                 word = ''.join(self.typed_chars).strip()
                 self.typed_chars.clear()
                 if word and not any(c.isdigit() for c in word):
-                    # Check for web search keyword
-                    if (self.config.get("enable_web_search", True) and
-                            word.lower() == self.config.get("web_search_keyword", "search")):
-                        self.web_search_mode = True
-                        return
-
                     self.phrase_buffer.append(word)
                     self.suggestion_active = False
                     self.check_combinations()
@@ -1126,20 +1010,14 @@ class GrammarPalApp:
                     self.on_phrase_completed(phrase)
 
     def on_phrase_completed(self, phrase: str):
-        if self.suggestion_active and not self.force_suggest_mode and not self.web_search_mode:
+        if self.suggestion_active and not self.force_suggest_mode:
             return
 
         if len(phrase) < self.config.get("min_phrase_length", MIN_PHRASE_LENGTH):
             return
 
         # Skip learned words
-        if (not self.web_search_mode and
-                self.config.get("enable_word_learning", True) and
-                self.ge.normalize_text(phrase) in self.ge.learned_words):
-            return
-
-        if self.web_search_mode:
-            self.handle_web_search(phrase)
+        if self.config.get("enable_word_learning", True) and self.ge.normalize_text(phrase) in self.ge.learned_words:
             return
 
         min_similarity = self.config.get("min_similarity", 0.5)
@@ -1171,18 +1049,6 @@ class GrammarPalApp:
                 daemon=True
             ).start()
             self.force_suggest_mode = False
-
-    def handle_web_search(self, phrase: str):
-        """Handle web search functionality"""
-        search_engine = SEARCH_ENGINES.get(self.config.get("search_engine", "Google"), GOOGLE_SEARCH_URL)
-        webbrowser.open_new_tab(search_engine + phrase.replace(" ", "+"))
-
-        if self.config.get("clear_buffer_after_search", True):
-            self.phrase_buffer.clear()
-            self.typed_chars.clear()
-
-        self.web_search_mode = False
-        self.suggestion_active = False
 
     def clear_phrase_buffer(self, phrase: str):
         """Clear the phrase buffer when a suggestion is ignored"""
